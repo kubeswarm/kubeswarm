@@ -1,0 +1,12 @@
+resources:
+  - ../default
+
+images:
+  - name: controller
+    newName: kubeswarm
+    newTag: dev
+
+patches:
+  - path: manager_dev_patch.yaml
+    target:
+      kind: Deployment

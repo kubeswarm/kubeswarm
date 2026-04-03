@@ -1,0 +1,19 @@
+FROM --platform=$BUILDPLATFORM golang:1.26.1-alpine AS builder
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+
+WORKDIR /workspace
+COPY go.mod go.sum ./
+COPY runtime/go.mod runtime/go.sum ./runtime/
+RUN go mod download && cd runtime && go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -C runtime -a -trimpath -ldflags="-s -w" \
+    -o /kubeswarm-runtime \
+    ./cmd/agent/
+
+FROM gcr.io/distroless/static:nonroot
+COPY --from=builder /kubeswarm-runtime /kubeswarm-runtime
+EXPOSE 8080
+USER nonroot:nonroot
+ENTRYPOINT ["/kubeswarm-runtime"]

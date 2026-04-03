@@ -1,0 +1,20 @@
+name: Notify Docs Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger version freeze in docs
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            /repos/kubeswarm/kubeswarm-docs/actions/workflows/docs-version.yml/dispatches \
+            -f ref=main \
+            -f "inputs[version]=${{ github.ref_name }}"
+        env:
+          GH_TOKEN: ${{ secrets.DOCS_DISPATCH_TOKEN }}

@@ -1,0 +1,133 @@
+// Copyright 2026. Licensed under the Apache License, Version 2.0.
+//
+// swarm.plugin.v1 defines the gRPC contract between the swarm-agent core and
+// external plugin services (RFC-0025). Any language that can generate gRPC
+// stubs from this file can implement a swarm plugin.
+//
+// Message flow for LLMProvider.RunTask (bidirectional stream):
+//
+//   core  → plugin : RunTaskMessage{init}          (opens the stream)
+//   plugin → core  : RunTaskMessage{chunk}         (zero or more streaming tokens)
+//   plugin → core  : RunTaskMessage{tool_call}     (zero or more tool invocations)
+//   core  → plugin : RunTaskMessage{tool_result}   (one per tool_call)
+//   plugin → core  : RunTaskMessage{result}        (exactly one, closes the stream)
+
+syntax = "proto3";
+
+package swarm.plugin.v1;
+
+option go_package = "github.com/kubeswarm/kubeswarm/proto/pluginv1";
+
+// ─── LLM Provider ────────────────────────────────────────────────────────────
+
+service LLMProvider {
+  // RunTask drives a full agentic task over a bidirectional stream.
+  // The core sends one RunTaskRequest to open the stream, then responds to
+  // ToolCallRequest messages from the plugin. The plugin sends Chunk messages
+  // for streaming tokens and a single Result message to close the stream.
+  rpc RunTask(stream RunTaskMessage) returns (stream RunTaskMessage);
+}
+
+message RunTaskMessage {
+  oneof payload {
+    RunTaskRequest  init        = 1; // core → plugin (first message)
+    ToolCallRequest tool_call   = 2; // plugin → core
+    ToolCallResult  tool_result = 3; // core → plugin
+    Chunk           chunk       = 4; // plugin → core (streaming token)
+    Result          result      = 5; // plugin → core (terminal, closes stream)
+  }
+}
+
+message RunTaskRequest {
+  string        task_id       = 1;
+  string        prompt        = 2;
+  string        system_prompt = 3;
+  string        model         = 4;
+  int32         max_tokens    = 5;
+  repeated Tool tools         = 6;
+}
+
+message Tool {
+  string name         = 1;
+  string description  = 2;
+  bytes  input_schema = 3; // JSON Schema as raw bytes
+}
+
+message ToolCallRequest {
+  string call_id   = 1;
+  string tool_name = 2;
+  bytes  input     = 3; // JSON-encoded tool arguments
+}
+
+message ToolCallResult {
+  string call_id = 1;
+  string output  = 2;
+  string error   = 3; // non-empty when tool execution failed
+}
+
+message Chunk {
+  string text = 1;
+}
+
+message Result {
+  string output        = 1;
+  int64  input_tokens  = 2;
+  int64  output_tokens = 3;
+  // Non-empty signals task failure. Prefix with "permanent failure: " to
+  // dead-letter immediately without retrying (e.g. billing exhausted, bad key).
+  string error = 4;
+}
+
+// ─── Task Queue ──────────────────────────────────────────────────────────────
+
+service TaskQueue {
+  rpc Submit (SubmitRequest)  returns (SubmitResponse);
+  rpc Poll   (PollRequest)    returns (PollResponse);   // blocks up to timeout_ms
+  rpc Ack    (AckRequest)     returns (AckResponse);
+  rpc Nack   (NackRequest)    returns (NackResponse);
+  rpc Results(ResultsRequest) returns (ResultsResponse);
+  rpc Cancel (CancelRequest)  returns (CancelResponse);
+}
+
+message Task {
+  string             id     = 1;
+  string             prompt = 2;
+  map<string,string> meta   = 3;
+}
+
+message SubmitRequest  {
+  string             prompt = 1;
+  map<string,string> meta   = 2;
+}
+message SubmitResponse { string task_id = 1; }
+
+message PollRequest    { int32 timeout_ms = 1; }
+message PollResponse   { Task task = 1; } // task fields empty when queue is empty
+
+message AckRequest {
+  Task   task          = 1;
+  string result        = 2;
+  int64  input_tokens  = 3;
+  int64  output_tokens = 4;
+}
+message AckResponse {}
+
+message NackRequest {
+  Task   task   = 1;
+  string reason = 2;
+}
+message NackResponse {}
+
+message ResultsRequest  { repeated string task_ids = 1; }
+message ResultsResponse { repeated TaskResult results = 1; }
+
+message TaskResult {
+  string task_id       = 1;
+  string output        = 2;
+  string error         = 3;
+  int64  input_tokens  = 4;
+  int64  output_tokens = 5;
+}
+
+message CancelRequest  { repeated string task_ids = 1; }
+message CancelResponse {}

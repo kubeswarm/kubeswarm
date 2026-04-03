@@ -1,0 +1,65 @@
+version: "2"
+run:
+  allow-parallel-runners: true
+linters:
+  default: none
+  enable:
+    - copyloopvar
+    - dupl
+    - errcheck
+    - goconst
+    - gocyclo
+    - govet
+    - ineffassign
+    - lll
+    - modernize
+    - misspell
+    - nakedret
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+    - gosec
+  settings:
+    gosec:
+      excludes:
+        # G104: Errors unhandled - already enforced by errcheck
+        - G104
+        # G115: Numeric conversion overflow - too noisy
+        - G115
+    revive:
+      rules:
+        - name: comment-spacings
+        - name: import-shadowing
+    modernize:
+      disable:
+        - omitzero
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - dupl
+          - lll
+        path: providers/
+      - linters:
+          - dupl
+          - lll
+        path: pkg/
+      # cmd/agent/main.go is an orchestration entrypoint; complexity limit not meaningful here.
+      - linters:
+          - gocyclo
+        path: cmd/agent/main.go
+    paths:
+      - third_party$
+      - builtin$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$

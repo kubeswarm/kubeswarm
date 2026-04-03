@@ -1,0 +1,10 @@
+# Exclude things not needed for building operator or agent runtime.
+# Uses a denylist - the allowlist (exclude-everything + re-include) approach
+# is unreliable in Docker's glob implementation for nested directories.
+.git
+.github
+config/
+**/*_test.go
+*.md
+Makefile
+Dockerfile*

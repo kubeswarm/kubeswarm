@@ -1,0 +1,18 @@
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmEvent
+metadata:
+  name: post-etl-trigger
+  namespace: default
+spec:
+  source:
+    type: team-output
+    teamOutput:
+      name: etl-pipeline # watch this SwarmTeam
+      onPhase: Succeeded # fire when it succeeds (default)
+  targets:
+    - team: analytics-pipeline
+      input:
+        # Pass the upstream team's output to the downstream pipeline
+        etlOutput: "{{ .trigger.output }}"
+  concurrencyPolicy: Forbid
+  suspended: false

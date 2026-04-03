@@ -1,0 +1,34 @@
+name: Label PR
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Apply label from branch prefix
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const branch = context.payload.pull_request.head.ref;
+            const map = {
+              'feat/':    'feat',
+              'fix/':     'fix',
+              'docs/':    'docs',
+              'chore/':   'chore',
+              'refactor/':'refactor',
+              'test/':    'test',
+              'ci/':      'ci',
+            };
+            const label = Object.entries(map).find(([prefix]) => branch.startsWith(prefix))?.[1];
+            if (!label) return;
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              labels: [label],
+            });

@@ -1,0 +1,243 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: swarmbudgets.kubeswarm.io
+spec:
+  group: kubeswarm.io
+  names:
+    categories:
+    - kubeswarm
+    kind: SwarmBudget
+    listKind: SwarmBudgetList
+    plural: swarmbudgets
+    shortNames:
+    - swbgt
+    - swbgts
+    singular: swarmbudget
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.spentUSD
+      name: Spent
+      type: number
+    - jsonPath: .spec.limit
+      name: Limit
+      type: number
+    - jsonPath: .status.pctUsed
+      name: Used%
+      type: number
+    - jsonPath: .spec.period
+      name: Period
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SwarmBudget defines a spend limit for one or more SwarmTeams.
+          The SwarmBudgetController recalculates status every 5 minutes by querying the
+          configured SpendStore. When hardStop is true, the SwarmRunReconciler blocks new
+          runs that would violate the budget.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SwarmBudgetSpec defines the desired state of an SwarmBudget.
+            properties:
+              currency:
+                default: USD
+                description: Currency is the ISO 4217 currency code. Must match the
+                  operator's CostProvider.
+                type: string
+              hardStop:
+                default: false
+                description: |-
+                  HardStop blocks new SwarmRuns when the limit is exceeded.
+                  When false (default), runs continue but a BudgetExceeded notification fires.
+                  When true, new SwarmRuns fail immediately with BudgetExceeded before any tokens are spent.
+                type: boolean
+              limit:
+                description: Limit is the maximum spend in the configured currency
+                  for one period.
+                minimum: 0
+                type: number
+                x-kubernetes-validations:
+                - message: limit must be non-negative
+                  rule: self >= 0
+              notifyRef:
+                description: |-
+                  NotifyRef references an SwarmNotify policy for budget alerts.
+                  Fires BudgetWarning (at warnAt%) and BudgetExceeded (at 100%).
+                properties:
+                  name:
+                    description: Name of the referenced object.
+                    type: string
+                required:
+                - name
+                type: object
+              period:
+                default: monthly
+                description: Period is the rolling window for spend accumulation.
+                enum:
+                - daily
+                - weekly
+                - monthly
+                type: string
+              selector:
+                description: Selector scopes this budget to matching resources.
+                properties:
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: MatchLabels selects SwarmTeams by label. Applied
+                      in addition to Namespace/Team.
+                    type: object
+                  namespace:
+                    description: |-
+                      Namespace scopes this budget to a single namespace.
+                      Empty means all namespaces in the cluster.
+                    type: string
+                  team:
+                    description: |-
+                      Team scopes this budget to a single SwarmTeam by name.
+                      Empty means all teams in the selected namespace(s).
+                    type: string
+                type: object
+              warnAt:
+                default: 80
+                description: |-
+                  WarnAt is the percentage of the limit at which a BudgetWarning notification fires (0–100).
+                  Zero disables warnings. Default: 80.
+                maximum: 100
+                minimum: 0
+                type: integer
+            required:
+            - limit
+            - selector
+            type: object
+          status:
+            description: SwarmBudgetStatus defines the observed state of an SwarmBudget.
+            properties:
+              conditions:
+                description: Conditions reflect the current state of the budget.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastUpdated:
+                description: LastUpdated is when the status was last recalculated.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation this status
+                  reflects.
+                format: int64
+                type: integer
+              pctUsed:
+                description: PctUsed is SpentUSD / Limit as a percentage (0–100).
+                type: number
+              periodStart:
+                description: PeriodStart is the start of the current budget window.
+                format: date-time
+                type: string
+              phase:
+                allOf:
+                - enum:
+                  - OK
+                  - Warning
+                  - Exceeded
+                - enum:
+                  - OK
+                  - Warning
+                  - Exceeded
+                description: Phase summarises the current budget state.
+                type: string
+              spentUSD:
+                description: SpentUSD is the total spend in the current period window.
+                type: number
+                x-kubernetes-int-or-string: true
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

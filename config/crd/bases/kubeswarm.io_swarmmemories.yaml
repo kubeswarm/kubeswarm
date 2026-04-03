@@ -1,0 +1,266 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: swarmmemories.kubeswarm.io
+spec:
+  group: kubeswarm.io
+  names:
+    categories:
+    - kubeswarm
+    kind: SwarmMemory
+    listKind: SwarmMemoryList
+    plural: swarmmemories
+    shortNames:
+    - swmem
+    - swmems
+    singular: swarmmemory
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.backend
+      name: Backend
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SwarmMemory defines the persistent memory backend for agent instances.
+          Reference it from an SwarmAgent via spec.memoryRef to give agents
+          durable memory across tasks.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SwarmMemorySpec defines the desired memory configuration.
+            properties:
+              backend:
+                description: Backend selects the memory storage strategy.
+                enum:
+                - in-context
+                - vector-store
+                - redis
+                type: string
+              embedding:
+                description: |-
+                  Embedding configures the embedding model used for vector memory operations (RFC-0026).
+                  Required when backend is "vector-store". The operator injects the resolved model ID,
+                  provider, and API key reference as environment variables into agent pods.
+                properties:
+                  apiKeyRef:
+                    description: |-
+                      APIKeyRef references a Secret key that holds the embedding provider API key.
+                      When not set, the agent falls back to the same provider key used for the LLM
+                      (OPENAI_API_KEY etc.). Required when the embedding provider differs from the LLM provider.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  dimensions:
+                    description: |-
+                      Dimensions is the output vector dimension. When 0 the model default is used.
+                      Use this to select a smaller dimension on models that support Matryoshka representations
+                      (e.g. text-embedding-3-small supports 512 or 1536).
+                    type: integer
+                  model:
+                    description: |-
+                      Model is the embedding model ID.
+                      Supported: text-embedding-3-small, text-embedding-3-large (OpenAI),
+                      text-embedding-004 (Google), voyage-3-lite (Voyage AI).
+                    minLength: 1
+                    type: string
+                  provider:
+                    default: auto
+                    description: |-
+                      Provider selects the embedding provider.
+                      When "auto" (default), the provider is inferred from the model name.
+                    enum:
+                    - auto
+                    - openai
+                    - google
+                    - voyageai
+                    type: string
+                required:
+                - model
+                type: object
+              redis:
+                description: Redis configures the Redis backend. Required when backend
+                  is "redis".
+                properties:
+                  maxEntries:
+                    description: MaxEntries caps the number of stored entries per
+                      agent instance. 0 means unlimited.
+                    type: integer
+                  secretRef:
+                    description: SecretRef names a Secret whose REDIS_URL key is injected
+                      into agent pods.
+                    properties:
+                      name:
+                        description: Name of the referenced object.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  ttlSeconds:
+                    default: 3600
+                    description: TTLSeconds is how long memory entries are retained.
+                      0 means no expiry.
+                    type: integer
+                required:
+                - secretRef
+                type: object
+              vectorStore:
+                description: VectorStore configures the vector-store backend. Required
+                  when backend is "vector-store".
+                properties:
+                  collection:
+                    default: agent-memories
+                    description: Collection is the collection/index name to store
+                      memories in.
+                    type: string
+                  endpoint:
+                    description: Endpoint is the base URL of the vector database (e.g.
+                      "http://qdrant:6333").
+                    type: string
+                  provider:
+                    description: Provider is the vector database to use.
+                    enum:
+                    - qdrant
+                    - pinecone
+                    - weaviate
+                    type: string
+                  secretRef:
+                    description: SecretRef optionally names a Secret whose VECTOR_STORE_API_KEY
+                      is injected into agent pods.
+                    properties:
+                      name:
+                        description: Name of the referenced object.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  ttlSeconds:
+                    description: TTLSeconds is how long memory entries are retained.
+                      0 means no expiry.
+                    type: integer
+                required:
+                - endpoint
+                - provider
+                type: object
+            required:
+            - backend
+            type: object
+          status:
+            description: SwarmMemoryStatus defines the observed state of SwarmMemory.
+            properties:
+              conditions:
+                description: Conditions reflect the current state of the SwarmMemory.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation this status
+                  reflects.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

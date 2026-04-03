@@ -1,0 +1,22 @@
+name: Notify Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "api/v1alpha1/**"
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger API reference sync in docs
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            /repos/kubeswarm/kubeswarm-docs/actions/workflows/docs-sync.yml/dispatches \
+            -f ref=main \
+            -f "inputs[sha]=${{ github.sha }}"
+        env:
+          GH_TOKEN: ${{ secrets.DOCS_DISPATCH_TOKEN }}
