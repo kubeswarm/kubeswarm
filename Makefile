@@ -86,6 +86,16 @@ docs-api: crd-ref-docs ## Generate API reference docs from Go types.
 		| sed 's/}}/\&#125;\&#125;/g' >> $(DOCS_PATH)
 	@echo "Generated API reference -> $(DOCS_PATH)"
 
+##@ Release
+
+IMG ?= ghcr.io/kubeswarm/kubeswarm-operator:latest
+
+.PHONY: build-installer
+build-installer: manifests kustomize ## Build dist/install.yaml for kubectl-based installs.
+	mkdir -p dist
+	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
+	$(KUSTOMIZE) build config/default > dist/install.yaml
+
 ##@ Local dev (Kind + Helm)
 
 HELM_CHART     ?= ../helm-charts/charts/kubeswarm
