@@ -1,0 +1,223 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: swarmsettings.kubeswarm.io
+spec:
+  group: kubeswarm.io
+  names:
+    categories:
+    - kubeswarm
+    kind: SwarmSettings
+    listKind: SwarmSettingsList
+    plural: swarmsettings
+    shortNames:
+    - swcfg
+    - swcfgs
+    singular: swarmsettings
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.memoryBackend
+      name: Memory
+      type: string
+    - jsonPath: .spec.outputFormat
+      name: OutputFormat
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: SwarmSettings holds shared configuration consumed by SwarmAgents.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SwarmSettingsSpec defines the shared configuration values.
+            properties:
+              fragments:
+                description: |-
+                  Fragments is an ordered list of named prompt fragments composed into the agent system prompt.
+                  Fragments from all referenced SwarmSettings are applied in settingsRefs list order.
+                  When the same fragment name appears in multiple settings, the last occurrence wins.
+                items:
+                  description: |-
+                    PromptFragment is one composable piece of text injected into the agent system prompt.
+                    Fragments from multiple SwarmSettings objects are composed using the settingsRefs list on
+                    SwarmAgent or SwarmTeamRole. Within a single SwarmSettings, fragments are applied in list order.
+                    When the same fragment name appears in multiple referenced settings, the last occurrence wins.
+                  properties:
+                    name:
+                      description: |-
+                        Name identifies this fragment. Must be unique within the SwarmSettings object.
+                        Used for override resolution when the same name appears in multiple settings.
+                      minLength: 1
+                      type: string
+                    position:
+                      default: append
+                      description: |-
+                        Position controls where this fragment is injected relative to the agent's systemPrompt.
+                          prepend — inserted before systemPrompt (persona, context, constraints)
+                          append  — inserted after systemPrompt (output rules, closing instructions)
+                      enum:
+                      - prepend
+                      - append
+                      type: string
+                    text:
+                      description: Text is the fragment content. May be multi-line.
+                      type: string
+                  required:
+                  - name
+                  - text
+                  type: object
+                type: array
+              memoryBackend:
+                default: in-context
+                description: MemoryBackend defines where agent memory is stored.
+                enum:
+                - in-context
+                - vector-store
+                - redis
+                type: string
+              outputFormat:
+                description: OutputFormat specifies the expected output format (e.g.
+                  "structured-json").
+                type: string
+              promptFragments:
+                description: |-
+                  PromptFragments is deprecated. Use Fragments instead.
+                  When both are set, Fragments takes precedence and PromptFragments is ignored.
+                  Retained for backward compatibility; will be removed in v1beta1.
+                properties:
+                  outputRules:
+                    description: |-
+                      OutputRules defines output format constraints appended to the system prompt.
+                      Deprecated: define a PromptFragment with position=append instead.
+                    type: string
+                  persona:
+                    description: |-
+                      Persona is a persona/role description prepended to the system prompt.
+                      Deprecated: define a PromptFragment with position=prepend instead.
+                    type: string
+                type: object
+              security:
+                description: |-
+                  Security configures MCP server access policy enforced by the admission webhook.
+                  The strictest policy across all referenced SwarmSettings wins.
+                properties:
+                  mcpAllowlist:
+                    description: |-
+                      MCPAllowlist is a list of URL prefixes. When set, the admission webhook rejects
+                      SwarmAgent specs that reference MCP server URLs not matching any listed prefix.
+                      Use this to prevent agents from calling arbitrary external MCP endpoints (T9).
+                      Example: ["https://search.mcp.example.com/", "https://browser.mcp.example.com/"]
+                    items:
+                      type: string
+                    type: array
+                  requireMCPAuth:
+                    description: |-
+                      RequireMCPAuth: when true, the webhook rejects SwarmAgent specs that declare MCP
+                      servers without an auth configuration (spec.mcpServers[*].auth.type must not be "none").
+                      Ensures no agent can call an MCP server without verified credentials.
+                    type: boolean
+                type: object
+              temperature:
+                description: Temperature controls response randomness (0.0–1.0).
+                pattern: ^(0(\.[0-9]+)?|1(\.0+)?)$
+                type: string
+            type: object
+          status:
+            description: SwarmSettingsStatus defines the observed state of SwarmSettings.
+            properties:
+              conditions:
+                description: Conditions reflect the current state of the SwarmSettings.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation this status
+                  reflects.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,1194 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: swarmagents.kubeswarm.io
+spec:
+  group: kubeswarm.io
+  names:
+    categories:
+    - kubeswarm
+    kind: SwarmAgent
+    listKind: SwarmAgentList
+    plural: swarmagents
+    shortNames:
+    - swagent
+    - swagents
+    singular: swarmagent
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.model
+      name: Model
+      type: string
+    - jsonPath: .spec.runtime.replicas
+      name: Replicas
+      type: integer
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .status.pendingTasks
+      name: Pending
+      priority: 1
+      type: integer
+    - jsonPath: .status.dailyTokenUsage.totalTokens
+      name: Tokens(24h)
+      priority: 1
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: SwarmAgent manages a pool of LLM agent instances.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SwarmAgentSpec defines the desired state of a SwarmAgent.
+            properties:
+              agents:
+                description: Agents lists other SwarmAgent or registry capabilities
+                  callable as tools via A2A.
+                items:
+                  description: |-
+                    AgentConnection defines another agent callable as a tool via A2A.
+                    Exactly one of agentRef or capabilityRef must be set.
+                  properties:
+                    agentRef:
+                      description: |-
+                        AgentRef names a SwarmAgent in the same namespace whose MCP-exposed
+                        capabilities are made available as tools. The target must have at least
+                        one capability with exposeMCP: true.
+                      properties:
+                        name:
+                          description: Name of the referenced object.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    capabilityRef:
+                      description: |-
+                        CapabilityRef names a capability ID in the namespace's SwarmRegistry.
+                        The operator resolves the MCP gateway URL at reconcile time.
+                      properties:
+                        name:
+                          description: Name of the referenced object.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    instructions:
+                      description: |-
+                        Instructions is operational context injected into the agent's system prompt
+                        for calls to this agent. Use to constrain scope or set expectations.
+                      type: string
+                    name:
+                      description: |-
+                        Name is the local identifier for this agent connection.
+                        Used in guardrails.tools allow/deny patterns: "<name>/<capability>".
+                      minLength: 1
+                      type: string
+                    trust:
+                      description: |-
+                        Trust classifies the trust level of this agent connection.
+                        Defaults to guardrails.tools.trust.default when unset.
+                      enum:
+                      - internal
+                      - external
+                      - sandbox
+                      type: string
+                  required:
+                  - name
+                  type: object
+                  x-kubernetes-validations:
+                  - message: exactly one of agentRef or capabilityRef must be set
+                    rule: has(self.agentRef) != has(self.capabilityRef)
+                type: array
+              apiKeyRef:
+                description: |-
+                  APIKeyRef injects an LLM provider API key from a native Kubernetes Secret.
+                  The key is set as the environment variable named by the Secret key
+                  (e.g. key "ANTHROPIC_API_KEY" in Secret "my-keys" sets ANTHROPIC_API_KEY).
+                  For multiple keys or complex setups, use envFrom instead.
+                properties:
+                  key:
+                    description: The key of the secret to select from.  Must be a
+                      valid secret key.
+                    type: string
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                  optional:
+                    description: Specify whether the Secret or its key must be defined
+                    type: boolean
+                required:
+                - key
+                type: object
+                x-kubernetes-map-type: atomic
+              capabilities:
+                description: |-
+                  Capabilities advertises what this agent can do to SwarmRegistry and the MCP gateway.
+                  Agents without capabilities are invisible to registry lookups.
+                items:
+                  description: AgentCapability advertises one capability this agent
+                    offers to SwarmRegistry and the MCP gateway.
+                  properties:
+                    description:
+                      description: Description explains the capability to human operators
+                        and LLM consumers.
+                      type: string
+                    exposeMCP:
+                      default: false
+                      description: |-
+                        ExposeMCP registers this capability as a named tool at the MCP gateway endpoint
+                        for this agent. Requires the MCP gateway to be enabled in the operator.
+                      type: boolean
+                    inputSchema:
+                      description: |-
+                        InputSchema is a JSON Schema object describing the capability's input parameters.
+                        Stored as a raw YAML/JSON object; enables CRD validation and tooling introspection.
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    name:
+                      description: Name uniquely identifies this capability. Used
+                        for registry lookups and MCP tool naming.
+                      minLength: 1
+                      type: string
+                    outputSchema:
+                      description: OutputSchema is a JSON Schema object describing
+                        the capability's output shape.
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    tags:
+                      description: |-
+                        Tags enable coarse-grained filtering in registry lookups.
+                        A lookup matches agents that declare ALL listed tags.
+                      items:
+                        type: string
+                      type: array
+                  required:
+                  - name
+                  type: object
+                type: array
+              envFrom:
+                description: |-
+                  EnvFrom injects environment variables from Secrets or ConfigMaps into agent pods.
+                  Entries listed here take precedence over the global kubeswarm-api-keys Secret.
+                items:
+                  description: EnvFromSource represents the source of a set of ConfigMaps
+                    or Secrets
+                  properties:
+                    configMapRef:
+                      description: The ConfigMap to select from
+                      properties:
+                        name:
+                          default: ""
+                          description: |-
+                            Name of the referent.
+                            This field is effectively required, but due to backwards compatibility is
+                            allowed to be empty. Instances of this type with an empty value here are
+                            almost certainly wrong.
+                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                          type: string
+                        optional:
+                          description: Specify whether the ConfigMap must be defined
+                          type: boolean
+                      type: object
+                      x-kubernetes-map-type: atomic
+                    prefix:
+                      description: |-
+                        Optional text to prepend to the name of each environment variable.
+                        May consist of any printable ASCII characters except '='.
+                      type: string
+                    secretRef:
+                      description: The Secret to select from
+                      properties:
+                        name:
+                          default: ""
+                          description: |-
+                            Name of the referent.
+                            This field is effectively required, but due to backwards compatibility is
+                            allowed to be empty. Instances of this type with an empty value here are
+                            almost certainly wrong.
+                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                          type: string
+                        optional:
+                          description: Specify whether the Secret must be defined
+                          type: boolean
+                      type: object
+                      x-kubernetes-map-type: atomic
+                  type: object
+                type: array
+              guardrails:
+                description: Guardrails groups tool permissions, budget enforcement,
+                  and execution limits.
+                properties:
+                  budgetRef:
+                    description: |-
+                      BudgetRef references a SwarmBudget that governs token spend for this agent.
+                      When the budget is exhausted new tasks are rejected.
+                    properties:
+                      name:
+                        description: Name of the referenced object.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  limits:
+                    description: Limits constrains per-agent resource and cost usage.
+                    properties:
+                      concurrentTasks:
+                        default: 5
+                        description: ConcurrentTasks is the maximum number of tasks
+                          processed in parallel per replica.
+                        type: integer
+                      dailyTokens:
+                        description: |-
+                          DailyTokens is the rolling 24-hour token budget (input + output combined).
+                          When reached the operator scales replicas to 0 and sets a BudgetExceeded condition.
+                          Resumes automatically when the 24-hour window rotates. Zero means no daily limit.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      retries:
+                        default: 3
+                        description: |-
+                          Retries is the number of times a failed task is requeued before dead-lettering.
+                          Set to 0 to disable retries entirely.
+                        maximum: 100
+                        minimum: 0
+                        type: integer
+                      timeoutSeconds:
+                        default: 120
+                        description: TimeoutSeconds is the per-task deadline in seconds.
+                        type: integer
+                      tokensPerCall:
+                        default: 8000
+                        description: TokensPerCall is the maximum number of tokens
+                          per LLM API call.
+                        type: integer
+                    type: object
+                  tools:
+                    description: Tools configures allow/deny lists and trust policy
+                      for tool calls.
+                    properties:
+                      allow:
+                        description: |-
+                          Allow is an allowlist of tool calls in "<server-name>/<tool-name>" format.
+                          Wildcards are supported: "filesystem/*" allows all tools from the filesystem server.
+                          When set, only listed tool calls are permitted. Deny takes precedence over allow.
+                        items:
+                          type: string
+                        type: array
+                      deny:
+                        description: |-
+                          Deny is a denylist of tool calls in "<server-name>/<tool-name>" format.
+                          Wildcards are supported: "shell/*" denies all shell tools.
+                          Deny takes precedence over allow when both match.
+                        items:
+                          type: string
+                        type: array
+                      trust:
+                        description: Trust configures the default trust level and
+                          input validation policy.
+                        properties:
+                          default:
+                            default: external
+                            description: |-
+                              Default is the trust level applied to tools and agents that do not declare
+                              an explicit trust field. Defaults to external.
+                            enum:
+                            - internal
+                            - external
+                            - sandbox
+                            type: string
+                          enforceInputValidation:
+                            description: |-
+                              EnforceInputValidation rejects tool calls whose arguments do not match the
+                              tool's declared schema when the tool's effective trust level is sandbox.
+                            type: boolean
+                        type: object
+                    type: object
+                type: object
+              model:
+                description: Model is the LLM model ID (e.g. "claude-sonnet-4-6").
+                minLength: 1
+                type: string
+              networkPolicy:
+                default: default
+                description: |-
+                  NetworkPolicy controls the NetworkPolicy generated for agent pods.
+                  default: DNS + Redis + open HTTPS egress.
+                  strict:  DNS + Redis; HTTPS egress restricted to declared MCP server IPs.
+                  disabled: no NetworkPolicy generated (use when CNI manages policy externally).
+                enum:
+                - default
+                - strict
+                - disabled
+                type: string
+              observability:
+                description: Observability groups health check, logging, and metrics
+                  configuration.
+                properties:
+                  healthCheck:
+                    description: HealthCheck defines how agent health is evaluated
+                      and how degraded agents are alerted.
+                    properties:
+                      intervalSeconds:
+                        default: 30
+                        description: IntervalSeconds is how often the probe runs.
+                        type: integer
+                      notifyRef:
+                        description: NotifyRef references a SwarmNotify policy used
+                          for AgentDegraded events.
+                        properties:
+                          name:
+                            description: Name of the referenced object.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      prompt:
+                        description: Prompt is the message sent when type is semantic.
+                        type: string
+                      type:
+                        default: semantic
+                        description: |-
+                          Type is the probe strategy.
+                          semantic: sends a prompt to the agent and evaluates the response via LLM.
+                          ping: sends an HTTP request to the agent's health endpoint.
+                        enum:
+                        - semantic
+                        - ping
+                        type: string
+                    required:
+                    - type
+                    type: object
+                  logging:
+                    description: Logging controls structured log emission from the
+                      agent runtime.
+                    properties:
+                      level:
+                        default: info
+                        description: Level is the minimum log level emitted.
+                        enum:
+                        - debug
+                        - info
+                        - warn
+                        - error
+                        type: string
+                      llmTurns:
+                        description: |-
+                          LLMTurns enables logging of the full LLM message history per task.
+                          Verbose and potentially sensitive — enable only for debugging.
+                        type: boolean
+                      redaction:
+                        description: Redaction controls scrubbing of sensitive values
+                          from log output.
+                        properties:
+                          pii:
+                            description: |-
+                              PII scrubs common PII patterns (email addresses, IP addresses, phone numbers)
+                              from tool call args and results.
+                            type: boolean
+                          secrets:
+                            default: true
+                            description: Secrets scrubs values sourced from secretKeyRef
+                              from tool call args and results.
+                            type: boolean
+                        type: object
+                      toolCalls:
+                        description: |-
+                          ToolCalls enables structured logging of tool invocations: tool name, args, and result.
+                          Emits log lines with msg="tool_call". Disabled by default to avoid noisy logs.
+                        type: boolean
+                    type: object
+                  metrics:
+                    description: Metrics controls Prometheus metrics exposure.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled exposes a /metrics endpoint on the agent
+                          pod for Prometheus scraping.
+                        type: boolean
+                    type: object
+                type: object
+              plugins:
+                description: Plugins configures external gRPC provider or queue overrides
+                  (RFC-0025).
+                properties:
+                  llm:
+                    description: |-
+                      LLM is the host:port of an external gRPC LLM provider plugin.
+                      When set the agent uses the gRPC adapter instead of the built-in provider.
+                    properties:
+                      address:
+                        description: Address is the host:port of the gRPC plugin server.
+                        minLength: 1
+                        type: string
+                      tls:
+                        description: |-
+                          TLS configures mTLS for the gRPC connection.
+                          When not set the connection is plaintext.
+                        properties:
+                          secretRef:
+                            description: SecretRef names the Secret containing the
+                              TLS credentials.
+                            properties:
+                              name:
+                                description: Name of the referenced object.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                        required:
+                        - secretRef
+                        type: object
+                    required:
+                    - address
+                    type: object
+                  queue:
+                    description: |-
+                      Queue is the host:port of an external gRPC task queue plugin.
+                      When set TASK_QUEUE_URL is ignored and the agent uses the gRPC queue adapter.
+                    properties:
+                      address:
+                        description: Address is the host:port of the gRPC plugin server.
+                        minLength: 1
+                        type: string
+                      tls:
+                        description: |-
+                          TLS configures mTLS for the gRPC connection.
+                          When not set the connection is plaintext.
+                        properties:
+                          secretRef:
+                            description: SecretRef names the Secret containing the
+                              TLS credentials.
+                            properties:
+                              name:
+                                description: Name of the referenced object.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                        required:
+                        - secretRef
+                        type: object
+                    required:
+                    - address
+                    type: object
+                type: object
+              prompt:
+                description: Prompt configures the agent's system prompt.
+                properties:
+                  from:
+                    description: |-
+                      From references a ConfigMap or Secret key whose content is used as the system prompt.
+                      Updating the referenced object triggers an automatic rolling restart of agent pods.
+                    properties:
+                      configMapKeyRef:
+                        description: ConfigMapKeyRef selects a key of a ConfigMap
+                          in the same namespace.
+                        properties:
+                          key:
+                            description: The key to select.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the ConfigMap or its key
+                              must be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      secretKeyRef:
+                        description: |-
+                          SecretKeyRef selects a key of a Secret in the same namespace.
+                          Use when the prompt contains sensitive instructions.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of configMapKeyRef or secretKeyRef must
+                        be set
+                      rule: has(self.configMapKeyRef) != has(self.secretKeyRef)
+                  inline:
+                    description: |-
+                      Inline is the system prompt text written directly in the manifest.
+                      For long or frequently-iterated prompts prefer from.
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: exactly one of inline or from must be set
+                  rule: has(self.inline) != has(self.from)
+              registryRef:
+                description: |-
+                  RegistryRef names the SwarmRegistry this agent registers into.
+                  Defaults to "default". Omit to opt out of all registry indexing.
+                properties:
+                  name:
+                    description: Name of the referenced object.
+                    type: string
+                required:
+                - name
+                type: object
+              runtime:
+                description: Runtime groups replica count, autoscaling, resources,
+                  and loop policy.
+                properties:
+                  autoscaling:
+                    description: |-
+                      Autoscaling configures KEDA-based autoscaling. When set, replicas is ignored.
+                      Requires KEDA v2 installed in the cluster.
+                    properties:
+                      maxReplicas:
+                        default: 10
+                        description: MaxReplicas is the maximum replica count.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      minReplicas:
+                        default: 1
+                        description: MinReplicas is the minimum replica count (idle
+                          floor).
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      targetPendingTasks:
+                        default: 5
+                        description: |-
+                          TargetPendingTasks is the number of pending queue entries per replica used
+                          as the KEDA scale trigger. Scale-up fires when pending tasks exceed this threshold.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    type: object
+                  loop:
+                    description: |-
+                      Loop configures deep-research runtime features: semantic dedup, in-loop context
+                      compression, and vector memory read/write. All features are disabled by default.
+                    properties:
+                      compression:
+                        description: |-
+                          Compression configures in-loop context compression. When set, the runner summarises
+                          older conversation turns when accumulated tokens exceed the threshold, allowing the
+                          agent to run beyond the model's context window.
+                        properties:
+                          contextWindow:
+                            description: |-
+                              ContextWindow explicitly sets the model's context window size in tokens.
+                              When set, overrides provider metadata and the built-in model map.
+                              Useful for custom or private model endpoints.
+                            type: integer
+                          instructions:
+                            description: Instructions overrides the built-in system
+                              prompt for the compression call.
+                            type: string
+                          model:
+                            description: |-
+                              Model is the model used for the compression call.
+                              A cheap fast model is recommended (e.g. claude-haiku-4-5-20251001).
+                              Defaults to claude-haiku-4-5-20251001 when unset.
+                            type: string
+                          preserveRecentTurns:
+                            default: 4
+                            description: |-
+                              PreserveRecentTurns is the number of most recent turns kept verbatim during
+                              compression. The system prompt is always preserved.
+                            type: integer
+                          threshold:
+                            default: 0.75
+                            description: |-
+                              Threshold is the fraction of the resolved context window at which compression
+                              is triggered. Must be between 0.5 and 0.95.
+                            maximum: 0.95
+                            minimum: 0.5
+                            type: number
+                          timeoutSeconds:
+                            default: 30
+                            description: |-
+                              TimeoutSeconds is the maximum time allowed for the compression model call.
+                              If exceeded compression is skipped and a CompressionTimeout warning event is recorded.
+                            type: integer
+                        type: object
+                      dedup:
+                        description: |-
+                          Dedup skips tool calls whose fingerprint (tool name + args hash) was already
+                          executed in the current task. The dedup set is task-local and discarded on completion.
+                        type: boolean
+                      memory:
+                        description: |-
+                          Memory configures vector memory read/write during the tool-use loop.
+                          Requires a SwarmMemory with a vector backend referenced via memory.ref.
+                        properties:
+                          maxTokens:
+                            default: 1024
+                            description: MaxTokens is the hard truncation limit applied
+                              when SummaryTokens is 0.
+                            type: integer
+                          minSimilarity:
+                            default: 0.7
+                            description: |-
+                              MinSimilarity is the minimum cosine similarity score for a retrieved finding to be injected.
+                              Findings below this threshold are silently dropped.
+                            maximum: 1
+                            minimum: 0
+                            type: number
+                          ref:
+                            description: Ref references the SwarmMemory object providing
+                              the vector backend.
+                            properties:
+                              name:
+                                description: Name of the referenced object.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          retrieve:
+                            description: |-
+                              Retrieve enables fetching similar prior findings from the vector store before each tool call.
+                              Findings are injected as a <swarm:prior-findings> block with the tool result.
+                            type: boolean
+                          store:
+                            description: Store enables writing a summary of each tool
+                              result to the vector store after execution.
+                            type: boolean
+                          summaryTokens:
+                            default: 256
+                            description: |-
+                              SummaryTokens is the advisory token limit for per-result summaries stored in the vector store.
+                              When > 0 a cheap model call produces the summary before storing.
+                              When 0 the raw result is truncated to MaxTokens instead.
+                            type: integer
+                          topK:
+                            default: 3
+                            description: TopK is the maximum number of prior findings
+                              injected per tool call.
+                            type: integer
+                        type: object
+                    type: object
+                  replicas:
+                    default: 1
+                    description: |-
+                      Replicas is the number of agent instances to run.
+                      Ignored when autoscaling is set; autoscaling.minReplicas acts as the floor.
+                    format: int32
+                    maximum: 50
+                    minimum: 0
+                    type: integer
+                  resources:
+                    description: |-
+                      Resources sets CPU and memory requests/limits for agent pods.
+                      When not set the operator injects safe defaults:
+                        requests: cpu=100m, memory=128Mi
+                        limits:   cpu=500m, memory=512Mi, ephemeral-storage=256Mi
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                type: object
+              settings:
+                description: |-
+                  Settings references SwarmSettings objects whose fragments are composed into
+                  this agent's system prompt, in list order. Last occurrence wins for duplicate keys.
+                items:
+                  description: LocalObjectReference identifies an object in the same
+                    namespace.
+                  properties:
+                    name:
+                      description: Name of the referenced object.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              tools:
+                description: Tools groups MCP server connections and inline webhook
+                  tools.
+                properties:
+                  mcp:
+                    description: |-
+                      MCP lists MCP server connections. Each entry exposes multiple tools
+                      via the Model Context Protocol SSE transport.
+                    items:
+                      description: |-
+                        MCPToolSpec defines one MCP server connection available to the agent.
+                        Exactly one of url or capabilityRef must be set.
+                      properties:
+                        auth:
+                          description: |-
+                            Auth configures authentication for this MCP server.
+                            When not set the connection is unauthenticated.
+                          properties:
+                            bearer:
+                              description: 'Bearer configures Authorization: Bearer
+                                token authentication.'
+                              properties:
+                                secretKeyRef:
+                                  description: SecretKeyRef selects the key of a Secret
+                                    containing the bearer token.
+                                  properties:
+                                    key:
+                                      description: The key of the secret to select
+                                        from.  Must be a valid secret key.
+                                      type: string
+                                    name:
+                                      default: ""
+                                      description: |-
+                                        Name of the referent.
+                                        This field is effectively required, but due to backwards compatibility is
+                                        allowed to be empty. Instances of this type with an empty value here are
+                                        almost certainly wrong.
+                                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                      type: string
+                                    optional:
+                                      description: Specify whether the Secret or its
+                                        key must be defined
+                                      type: boolean
+                                  required:
+                                  - key
+                                  type: object
+                                  x-kubernetes-map-type: atomic
+                              required:
+                              - secretKeyRef
+                              type: object
+                            mtls:
+                              description: MTLS configures mTLS client certificate
+                                authentication.
+                              properties:
+                                secretRef:
+                                  description: SecretRef names the Secret containing
+                                    the TLS credentials.
+                                  properties:
+                                    name:
+                                      description: Name of the referenced object.
+                                      type: string
+                                  required:
+                                  - name
+                                  type: object
+                              required:
+                              - secretRef
+                              type: object
+                          type: object
+                          x-kubernetes-validations:
+                          - message: bearer and mtls are mutually exclusive
+                            rule: '!(has(self.bearer) && has(self.mtls))'
+                        capabilityRef:
+                          description: |-
+                            CapabilityRef names a capability ID in the namespace's SwarmRegistry.
+                            The operator resolves the actual MCP server URL at reconcile time.
+                            Use this in shareable agent definitions so the URL is supplied per-deployment.
+                            Mutually exclusive with url.
+                          type: string
+                        headers:
+                          description: Headers is a list of HTTP headers sent with
+                            every request to this MCP server.
+                          items:
+                            description: |-
+                              MCPHeader defines a single HTTP header sent with every request to an MCP server.
+                              Exactly one of value or secretKeyRef must be set.
+                            properties:
+                              name:
+                                description: Name is the HTTP header name.
+                                minLength: 1
+                                type: string
+                              secretKeyRef:
+                                description: SecretKeyRef selects a key of a Secret
+                                  for sensitive header values.
+                                properties:
+                                  key:
+                                    description: The key of the secret to select from.  Must
+                                      be a valid secret key.
+                                    type: string
+                                  name:
+                                    default: ""
+                                    description: |-
+                                      Name of the referent.
+                                      This field is effectively required, but due to backwards compatibility is
+                                      allowed to be empty. Instances of this type with an empty value here are
+                                      almost certainly wrong.
+                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                    type: string
+                                  optional:
+                                    description: Specify whether the Secret or its
+                                      key must be defined
+                                    type: boolean
+                                required:
+                                - key
+                                type: object
+                                x-kubernetes-map-type: atomic
+                              value:
+                                description: Value is a literal header value. Use
+                                  for non-sensitive headers.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                            x-kubernetes-validations:
+                            - message: exactly one of value or secretKeyRef must be
+                                set
+                              rule: has(self.value) != has(self.secretKeyRef)
+                          type: array
+                        instructions:
+                          description: |-
+                            Instructions is operational context injected into the agent's system prompt
+                            for this tool server. Use for deployment-specific constraints (branch, project key,
+                            environment). General tool documentation belongs in the MCP tool's own description.
+                          type: string
+                        name:
+                          description: |-
+                            Name is a unique identifier for this MCP server within the agent.
+                            Used in guardrails.tools allow/deny patterns: "<name>/<tool>".
+                          minLength: 1
+                          type: string
+                        trust:
+                          description: |-
+                            Trust classifies the trust level of this MCP server.
+                            Defaults to the guardrails.tools.trust.default when unset.
+                          enum:
+                          - internal
+                          - external
+                          - sandbox
+                          type: string
+                        url:
+                          description: |-
+                            URL is the direct SSE endpoint of the MCP server.
+                            Mutually exclusive with capabilityRef.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                      x-kubernetes-validations:
+                      - message: exactly one of url or capabilityRef must be set
+                        rule: has(self.url) != has(self.capabilityRef)
+                    type: array
+                  webhooks:
+                    description: Webhooks lists inline single-endpoint HTTP tools.
+                    items:
+                      description: |-
+                        WebhookToolSpec defines an inline HTTP tool available to the agent without a full MCP server.
+                        Use for simple single-endpoint callbacks. For rich integrations prefer an MCP server.
+                      properties:
+                        description:
+                          description: Description explains the tool's purpose to
+                            the LLM and to human operators.
+                          type: string
+                        method:
+                          default: POST
+                          description: Method is the HTTP method used when calling
+                            the endpoint.
+                          enum:
+                          - GET
+                          - POST
+                          - PUT
+                          - PATCH
+                          type: string
+                        name:
+                          description: Name is the tool identifier exposed to the
+                            LLM. Must be unique within the agent.
+                          minLength: 1
+                          type: string
+                        schema:
+                          description: |-
+                            Schema is a JSON Schema object describing the tool's input parameters.
+                            Stored as a raw JSON/YAML object; validated by the LLM runtime.
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                        trust:
+                          description: |-
+                            Trust classifies the trust level of this webhook endpoint.
+                            Defaults to the guardrails.tools.trust.default when unset.
+                          enum:
+                          - internal
+                          - external
+                          - sandbox
+                          type: string
+                        url:
+                          description: URL is the HTTP endpoint the agent calls when
+                            the LLM invokes this tool.
+                          type: string
+                      required:
+                      - name
+                      - url
+                      type: object
+                    type: array
+                type: object
+            required:
+            - model
+            - prompt
+            type: object
+            x-kubernetes-validations:
+            - message: spec.prompt is required
+              rule: has(self.prompt)
+          status:
+            description: SwarmAgentStatus defines the observed state of SwarmAgent.
+            properties:
+              conditions:
+                description: Conditions reflect the current state of the SwarmAgent.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              dailyTokenUsage:
+                description: |-
+                  DailyTokenUsage is the sum of tokens consumed in the rolling 24-hour window.
+                  Populated only when guardrails.limits.dailyTokens is set.
+                properties:
+                  inputTokens:
+                    description: InputTokens is the total number of prompt/input tokens
+                      sent to the LLM.
+                    format: int64
+                    type: integer
+                  outputTokens:
+                    description: OutputTokens is the total number of completion/output
+                      tokens generated by the LLM.
+                    format: int64
+                    type: integer
+                  totalTokens:
+                    description: TotalTokens is InputTokens + OutputTokens, provided
+                      for convenient display.
+                    format: int64
+                    type: integer
+                required:
+                - inputTokens
+                - outputTokens
+                - totalTokens
+                type: object
+              desiredReplicas:
+                description: |-
+                  DesiredReplicas is the autoscaling-computed target replica count.
+                  Nil for standalone agents not managed by a team autoscaler.
+                format: int32
+                type: integer
+              exposedMCPCapabilities:
+                description: ExposedMCPCapabilities lists the capability names currently
+                  registered at the MCP gateway.
+                items:
+                  type: string
+                type: array
+              mcpServers:
+                description: MCPServers reports the last observed connectivity state
+                  of each configured MCP server.
+                items:
+                  description: SwarmAgentMCPStatus reports the last observed health
+                    of one MCP server.
+                  properties:
+                    healthy:
+                      description: Healthy is true when the last probe received a
+                        non-5xx HTTP response.
+                      type: boolean
+                    lastCheck:
+                      description: LastCheck is when the probe was last run.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message holds error detail when Healthy is false.
+                      type: string
+                    name:
+                      description: Name matches MCPToolSpec.name.
+                      type: string
+                    url:
+                      description: URL is the MCP server endpoint that was probed.
+                      type: string
+                  required:
+                  - healthy
+                  - name
+                  - url
+                  type: object
+                type: array
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation this status
+                  reflects.
+                format: int64
+                type: integer
+              pendingTasks:
+                description: PendingTasks is the current number of tasks waiting in
+                  the queue for this agent.
+                format: int32
+                type: integer
+              readyReplicas:
+                description: ReadyReplicas is the number of agent pods ready to accept
+                  tasks.
+                format: int32
+                type: integer
+              replicas:
+                description: Replicas is the total number of agent pods (ready or
+                  not).
+                format: int32
+                type: integer
+              systemPromptHash:
+                description: SystemPromptHash is the SHA-256 hex digest of the resolved
+                  system prompt last applied.
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      scale:
+        specReplicasPath: .spec.runtime.replicas
+        statusReplicasPath: .status.replicas
+      status: {}

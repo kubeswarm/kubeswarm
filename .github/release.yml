@@ -1,0 +1,17 @@
+changelog:
+  categories:
+    - title: "New Features"
+      labels:
+        - "feat"
+    - title: "Bug Fixes"
+      labels:
+        - "bug"
+    - title: "Documentation"
+      labels:
+        - "docs"
+    - title: "Other Changes"
+      labels:
+        - "chore"
+        - "refactor"
+        - "test"
+        - "ci"

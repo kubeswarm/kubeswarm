@@ -1,0 +1,26 @@
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmEvent
+metadata:
+  name: deploy-webhook-trigger
+  namespace: default
+spec:
+  source:
+    type: webhook
+  targets:
+    - team: deploy-pipeline
+      input:
+        # Fields from the POST body are available as {{ .trigger.body.<field> }}
+        environment: "{{ .trigger.body.environment }}"
+        imageTag: "{{ .trigger.body.imageTag }}"
+  concurrencyPolicy: Allow
+  suspended: false
+# After creation, check status.webhookURL for the endpoint to POST to.
+# Authenticate with the token from the Secret: <trigger-name>-webhook-token
+#
+# Example:
+#   TOKEN=$(kubectl get secret deploy-webhook-trigger-webhook-token \
+#             -o jsonpath='{.data.token}' | base64 -d)
+#   curl -X POST "$WEBHOOK_URL" \
+#        -H "Authorization: Bearer $TOKEN" \
+#        -H "Content-Type: application/json" \
+#        -d '{"environment":"staging","imageTag":"v1.2.3"}'

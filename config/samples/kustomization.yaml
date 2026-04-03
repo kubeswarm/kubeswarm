@@ -1,0 +1,12 @@
+## Append samples of your project ##
+resources:
+  - kubeswarm_v1alpha1_swarmagent.yaml
+  - kubeswarm_v1alpha1_swarmsettings.yaml
+  - kubeswarm_v1alpha1_swarmmemory.yaml
+  - kubeswarm_v1alpha1_swarmevent_cron.yaml
+  - kubeswarm_v1alpha1_swarmevent_webhook.yaml
+  - kubeswarm_v1alpha1_swarmevent_flow_output.yaml
+  - kubeswarm_v1alpha1_swarmteam.yaml
+  - kubeswarm_v1alpha1_swarmregistry.yaml
+  - kubeswarm_v1alpha1_agent_as_tool.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

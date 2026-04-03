@@ -1,0 +1,7 @@
+# Local development image. The binary is pre-built outside Docker using go.work
+# (which resolves controller from the local sibling directory). The CI/production image
+# is Dockerfile, which builds entirely inside Docker using the published controller module.
+FROM gcr.io/distroless/static:nonroot
+COPY kubeswarm-operator /kubeswarm-operator
+USER 65532:65532
+ENTRYPOINT ["/kubeswarm-operator"]

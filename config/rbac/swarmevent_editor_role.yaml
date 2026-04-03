@@ -1,0 +1,27 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: kubeswarm
+    app.kubernetes.io/managed-by: kustomize
+  name: swarmevent-editor-role
+rules:
+  - apiGroups:
+      - kubeswarm
+    resources:
+      - swarmevents
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - kubeswarm
+    resources:
+      - swarmevents/status
+    verbs:
+      - get

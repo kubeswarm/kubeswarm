@@ -1,0 +1,10 @@
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmRegistry
+metadata:
+  name: default-registry
+  namespace: swarm-teams
+spec:
+  scope: namespace-scoped
+  policy:
+    maxDepth: 3
+    allowCrossTeam: false
