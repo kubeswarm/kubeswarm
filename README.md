@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/kubeswarm/kubeswarm-design/main/logo/logo-full.svg" width="400" alt="kubeswarm - orchestrate. scale. swarm.">
+  <img src="https://assets.kubeswarm.io/logo.svg" width="200" alt="kubeswarm - orchestrate. scale. swarm.">
 </p>
 
 <p align="center">
