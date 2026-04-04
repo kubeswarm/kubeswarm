@@ -6,9 +6,26 @@ on:
       - "v*"
 
 jobs:
+  test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test
+
   build:
     name: Build (${{ matrix.name }})
     runs-on: ubuntu-latest
+    needs: [test]
     strategy:
       matrix:
         include:
@@ -207,12 +224,13 @@ jobs:
             --field event_type=operator-released \
             --field "client_payload[version]=${GITHUB_REF_NAME#v}"
 
-      - name: Dispatch dashboard types sync
-        if: ${{ !contains(github.ref_name, '-') }}
-        env:
-          GH_TOKEN: ${{ secrets.HELM_SYNC_TOKEN }}
-        run: |
-          gh api repos/kubeswarm/kubeswarm-dashboard/dispatches \
-            --method POST \
-            --field event_type=operator-released \
-            --field "client_payload[version]=${GITHUB_REF_NAME#v}"
+      # TODO: uncomment when kubeswarm-dashboard repo is created
+      # - name: Dispatch dashboard types sync
+      #   if: ${{ !contains(github.ref_name, '-') }}
+      #   env:
+      #     GH_TOKEN: ${{ secrets.HELM_SYNC_TOKEN }}
+      #   run: |
+      #     gh api repos/kubeswarm/kubeswarm-dashboard/dispatches \
+      #       --method POST \
+      #       --field event_type=operator-released \
+      #       --field "client_payload[version]=${GITHUB_REF_NAME#v}"
