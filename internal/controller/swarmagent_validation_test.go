@@ -73,7 +73,7 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 		It("should accept a SwarmAgent with all sections populated", func() {
 			replicas := int32(2)
 			agent := validAgent(uniqueName("valid-full"))
-			agent.Spec.Runtime = &kubeswarmv1alpha1.AgentRuntime{
+			agent.Spec.Runtime = kubeswarmv1alpha1.AgentRuntime{
 				Replicas:  &replicas,
 				Resources: &corev1.ResourceRequirements{},
 			}
@@ -112,7 +112,7 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 				},
 			}
 			agent.Spec.Observability = &kubeswarmv1alpha1.AgentObservability{
-				Logging: &kubeswarmv1alpha1.AgentLogging{Level: "info", ToolCalls: true},
+				Logging: &kubeswarmv1alpha1.AgentLogging{Level: kubeswarmv1alpha1.LogLevelInfo, ToolCalls: true},
 				Metrics: &kubeswarmv1alpha1.AgentMetrics{Enabled: true},
 			}
 			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
@@ -152,14 +152,20 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 		It("should accept valid values", func() {
 			for _, np := range []kubeswarmv1alpha1.NetworkPolicyMode{"default", "strict", "disabled"} {
 				agent := validAgent(uniqueName("np"))
-				agent.Spec.NetworkPolicy = np
+				if agent.Spec.Infrastructure == nil {
+					agent.Spec.Infrastructure = &kubeswarmv1alpha1.AgentInfrastructure{}
+				}
+				agent.Spec.Infrastructure.NetworkPolicy = np
 				Expect(k8sClient.Create(ctx, agent)).To(Succeed(), "networkPolicy=%s", np)
 			}
 		})
 
 		It("should reject invalid networkPolicy", func() {
 			agent := validAgent(uniqueName("bad-np"))
-			agent.Spec.NetworkPolicy = "open"
+			if agent.Spec.Infrastructure == nil {
+				agent.Spec.Infrastructure = &kubeswarmv1alpha1.AgentInfrastructure{}
+			}
+			agent.Spec.Infrastructure.NetworkPolicy = "open"
 			err := k8sClient.Create(ctx, agent)
 			Expect(err).To(HaveOccurred())
 		})
@@ -167,7 +173,7 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 
 	Context("healthCheck type enum", func() {
 		It("should accept semantic and ping", func() {
-			for _, hcType := range []string{"semantic", "ping"} {
+			for _, hcType := range []kubeswarmv1alpha1.HealthCheckType{kubeswarmv1alpha1.HealthCheckSemantic, kubeswarmv1alpha1.HealthCheckPing} {
 				agent := validAgent(uniqueName("hc"))
 				agent.Spec.Observability = &kubeswarmv1alpha1.AgentObservability{
 					HealthCheck: &kubeswarmv1alpha1.AgentHealthCheck{Type: hcType},
@@ -179,7 +185,7 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 		It("should reject invalid healthCheck type", func() {
 			agent := validAgent(uniqueName("bad-hc"))
 			agent.Spec.Observability = &kubeswarmv1alpha1.AgentObservability{
-				HealthCheck: &kubeswarmv1alpha1.AgentHealthCheck{Type: "tcp"},
+				HealthCheck: &kubeswarmv1alpha1.AgentHealthCheck{Type: kubeswarmv1alpha1.HealthCheckType("tcp")},
 			}
 			err := k8sClient.Create(ctx, agent)
 			Expect(err).To(HaveOccurred())
@@ -188,7 +194,7 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 
 	Context("logging level enum", func() {
 		It("should accept valid levels", func() {
-			for _, level := range []string{"debug", "info", "warn", "error"} {
+			for _, level := range []kubeswarmv1alpha1.LogLevel{kubeswarmv1alpha1.LogLevelDebug, kubeswarmv1alpha1.LogLevelInfo, kubeswarmv1alpha1.LogLevelWarn, kubeswarmv1alpha1.LogLevelError} {
 				agent := validAgent(uniqueName("log"))
 				agent.Spec.Observability = &kubeswarmv1alpha1.AgentObservability{
 					Logging: &kubeswarmv1alpha1.AgentLogging{Level: level},
@@ -200,7 +206,7 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 		It("should reject invalid logging level", func() {
 			agent := validAgent(uniqueName("bad-log"))
 			agent.Spec.Observability = &kubeswarmv1alpha1.AgentObservability{
-				Logging: &kubeswarmv1alpha1.AgentLogging{Level: "trace"},
+				Logging: &kubeswarmv1alpha1.AgentLogging{Level: kubeswarmv1alpha1.LogLevel("trace")},
 			}
 			err := k8sClient.Create(ctx, agent)
 			Expect(err).To(HaveOccurred())
@@ -240,7 +246,7 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 		It("should reject replicas above 50", func() {
 			over := int32(51)
 			agent := validAgent(uniqueName("rep-high"))
-			agent.Spec.Runtime = &kubeswarmv1alpha1.AgentRuntime{Replicas: &over}
+			agent.Spec.Runtime = kubeswarmv1alpha1.AgentRuntime{Replicas: &over}
 			err := k8sClient.Create(ctx, agent)
 			Expect(err).To(HaveOccurred())
 		})
@@ -248,7 +254,7 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 		It("should accept replicas at 0", func() {
 			zero := int32(0)
 			agent := validAgent(uniqueName("rep-zero"))
-			agent.Spec.Runtime = &kubeswarmv1alpha1.AgentRuntime{Replicas: &zero}
+			agent.Spec.Runtime = kubeswarmv1alpha1.AgentRuntime{Replicas: &zero}
 			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
 		})
 	})

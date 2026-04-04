@@ -128,6 +128,8 @@ type MCPToolSpec struct {
 
 	// Headers is a list of HTTP headers sent with every request to this MCP server.
 	// +optional
+	// +listType=map
+	// +listMapKey=name
 	Headers []MCPHeader `json:"headers,omitempty"`
 }
 
@@ -169,10 +171,14 @@ type AgentTools struct {
 	// MCP lists MCP server connections. Each entry exposes multiple tools
 	// via the Model Context Protocol SSE transport.
 	// +optional
+	// +listType=map
+	// +listMapKey=name
 	MCP []MCPToolSpec `json:"mcp,omitempty"`
 
 	// Webhooks lists inline single-endpoint HTTP tools.
 	// +optional
+	// +listType=map
+	// +listMapKey=name
 	Webhooks []WebhookToolSpec `json:"webhooks,omitempty"`
 }
 
@@ -574,18 +580,58 @@ type AgentPlugins struct {
 	Queue *PluginEndpoint `json:"queue,omitempty"`
 }
 
+// AgentInfrastructure groups cluster integration concerns for the agent.
+type AgentInfrastructure struct {
+	// RegistryRef names the SwarmRegistry this agent registers into.
+	// Defaults to "default". Omit to opt out of all registry indexing.
+	// +optional
+	RegistryRef *LocalObjectReference `json:"registryRef,omitempty"`
+
+	// NetworkPolicy controls the NetworkPolicy generated for agent pods.
+	// default: DNS + Redis + open HTTPS egress.
+	// strict:  DNS + Redis; HTTPS egress restricted to declared MCP server IPs.
+	// disabled: no NetworkPolicy generated (use when CNI manages policy externally).
+	// +kubebuilder:default=default
+	// +optional
+	NetworkPolicy NetworkPolicyMode `json:"networkPolicy,omitempty"`
+
+	// APIKeyRef injects an LLM provider API key from a native Kubernetes Secret.
+	// The key is set as the environment variable named by the Secret key
+	// (e.g. key "ANTHROPIC_API_KEY" in Secret "my-keys" sets ANTHROPIC_API_KEY).
+	// For multiple keys or complex setups, use envFrom instead.
+	// +optional
+	APIKeyRef *corev1.SecretKeySelector `json:"apiKeyRef,omitempty"`
+
+	// EnvFrom injects environment variables from Secrets or ConfigMaps into agent pods.
+	// Entries listed here take precedence over the global kubeswarm-api-keys Secret.
+	// +optional
+	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
+
+	// Plugins configures external gRPC provider or queue overrides (RFC-0025).
+	// +optional
+	Plugins *AgentPlugins `json:"plugins,omitempty"`
+}
+
 // -----------------------------------------------------------------------------
 // Observability types
 // -----------------------------------------------------------------------------
 
+// HealthCheckType is the strategy used to evaluate agent health.
+// +kubebuilder:validation:Enum=semantic;ping
+type HealthCheckType string
+
+const (
+	// HealthCheckSemantic sends a prompt to the agent and evaluates the response via LLM.
+	HealthCheckSemantic HealthCheckType = "semantic"
+	// HealthCheckPing sends an HTTP request to the agent's health endpoint.
+	HealthCheckPing HealthCheckType = "ping"
+)
+
 // AgentHealthCheck defines how agent health is evaluated.
 type AgentHealthCheck struct {
 	// Type is the probe strategy.
-	// semantic: sends a prompt to the agent and evaluates the response via LLM.
-	// ping: sends an HTTP request to the agent's health endpoint.
-	// +kubebuilder:validation:Enum=semantic;ping
 	// +kubebuilder:default=semantic
-	Type string `json:"type"`
+	Type HealthCheckType `json:"type"`
 
 	// IntervalSeconds is how often the probe runs.
 	// +kubebuilder:default=30
@@ -614,14 +660,25 @@ type LogRedactionPolicy struct {
 	PII bool `json:"pii,omitempty"`
 }
 
+// LogLevel is the minimum log level emitted by the agent runtime.
+// +kubebuilder:validation:Enum=debug;info;warn;error
+type LogLevel string
+
+const (
+	LogLevelDebug LogLevel = "debug"
+	LogLevelInfo  LogLevel = "info"
+	LogLevelWarn  LogLevel = "warn"
+	LogLevelError LogLevel = "error"
+)
+
 // AgentLogging controls structured log emission from the agent runtime.
 // All logs are emitted as JSON via slog.
+// +kubebuilder:validation:XValidation:rule="!has(self.llmTurns) || !self.llmTurns || (has(self.redaction) && self.redaction.secrets)",message="redaction.secrets must be true when llmTurns is enabled"
 type AgentLogging struct {
 	// Level is the minimum log level emitted.
-	// +kubebuilder:validation:Enum=debug;info;warn;error
 	// +kubebuilder:default=info
 	// +optional
-	Level string `json:"level,omitempty"`
+	Level LogLevel `json:"level,omitempty"`
 
 	// ToolCalls enables structured logging of tool invocations: tool name, args, and result.
 	// Emits log lines with msg="tool_call". Disabled by default to avoid noisy logs.
@@ -665,19 +722,15 @@ type AgentObservability struct {
 // LocalObjectReference
 // -----------------------------------------------------------------------------
 
-// LocalObjectReference identifies an object in the same namespace.
-type LocalObjectReference struct {
-	// Name of the referenced object.
-	// +kubebuilder:validation:Required
-	Name string `json:"name"`
-}
+// LocalObjectReference is an alias for corev1.LocalObjectReference.
+// Kept as a type alias for documentation clarity in kubeswarm CRDs.
+type LocalObjectReference = corev1.LocalObjectReference
 
 // -----------------------------------------------------------------------------
 // SwarmAgentSpec / Status
 // -----------------------------------------------------------------------------
 
 // SwarmAgentSpec defines the desired state of a SwarmAgent.
-// +kubebuilder:validation:XValidation:rule="has(self.prompt)",message="spec.prompt is required"
 type SwarmAgentSpec struct {
 
 	// --- Identity: what the agent IS ---
@@ -694,11 +747,15 @@ type SwarmAgentSpec struct {
 	// Settings references SwarmSettings objects whose fragments are composed into
 	// this agent's system prompt, in list order. Last occurrence wins for duplicate keys.
 	// +optional
+	// +listType=map
+	// +listMapKey=name
 	Settings []LocalObjectReference `json:"settings,omitempty"`
 
 	// Capabilities advertises what this agent can do to SwarmRegistry and the MCP gateway.
 	// Agents without capabilities are invisible to registry lookups.
 	// +optional
+	// +listType=map
+	// +listMapKey=name
 	Capabilities []AgentCapability `json:"capabilities,omitempty"`
 
 	// --- Tools: what the agent can USE ---
@@ -711,6 +768,8 @@ type SwarmAgentSpec struct {
 
 	// Agents lists other SwarmAgent or registry capabilities callable as tools via A2A.
 	// +optional
+	// +listType=map
+	// +listMapKey=name
 	Agents []AgentConnection `json:"agents,omitempty"`
 
 	// --- Guardrails: safety + cost controls ---
@@ -722,39 +781,15 @@ type SwarmAgentSpec struct {
 	// --- Runtime: how the agent runs ---
 
 	// Runtime groups replica count, autoscaling, resources, and loop policy.
-	// +optional
-	Runtime *AgentRuntime `json:"runtime,omitempty"`
+	// +kubebuilder:default={}
+	Runtime AgentRuntime `json:"runtime,omitempty"`
 
 	// --- Infrastructure ---
 
-	// RegistryRef names the SwarmRegistry this agent registers into.
-	// Defaults to "default". Omit to opt out of all registry indexing.
+	// Infrastructure groups cluster integration concerns: registry, network policy,
+	// API key injection, environment variables, and gRPC plugin overrides.
 	// +optional
-	RegistryRef *LocalObjectReference `json:"registryRef,omitempty"`
-
-	// NetworkPolicy controls the NetworkPolicy generated for agent pods.
-	// default: DNS + Redis + open HTTPS egress.
-	// strict:  DNS + Redis; HTTPS egress restricted to declared MCP server IPs.
-	// disabled: no NetworkPolicy generated (use when CNI manages policy externally).
-	// +kubebuilder:default=default
-	// +optional
-	NetworkPolicy NetworkPolicyMode `json:"networkPolicy,omitempty"`
-
-	// APIKeyRef injects an LLM provider API key from a native Kubernetes Secret.
-	// The key is set as the environment variable named by the Secret key
-	// (e.g. key "ANTHROPIC_API_KEY" in Secret "my-keys" sets ANTHROPIC_API_KEY).
-	// For multiple keys or complex setups, use envFrom instead.
-	// +optional
-	APIKeyRef *corev1.SecretKeySelector `json:"apiKeyRef,omitempty"`
-
-	// EnvFrom injects environment variables from Secrets or ConfigMaps into agent pods.
-	// Entries listed here take precedence over the global kubeswarm-api-keys Secret.
-	// +optional
-	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
-
-	// Plugins configures external gRPC provider or queue overrides (RFC-0025).
-	// +optional
-	Plugins *AgentPlugins `json:"plugins,omitempty"`
+	Infrastructure *AgentInfrastructure `json:"infrastructure,omitempty"`
 
 	// --- Observability ---
 
@@ -770,7 +805,9 @@ type SwarmAgentMCPStatus struct {
 	// URL is the MCP server endpoint that was probed.
 	URL string `json:"url"`
 	// Healthy is true when the last probe received a non-5xx HTTP response.
-	Healthy bool `json:"healthy"`
+	// Nil means the server has not been probed yet.
+	// +optional
+	Healthy *bool `json:"healthy,omitempty"`
 	// Message holds error detail when Healthy is false.
 	// +optional
 	Message string `json:"message,omitempty"`
@@ -798,9 +835,11 @@ type SwarmAgentStatus struct {
 	// Populated only when guardrails.limits.dailyTokens is set.
 	// +optional
 	DailyTokenUsage *TokenUsage `json:"dailyTokenUsage,omitempty"`
-	// MCPServers reports the last observed connectivity state of each configured MCP server.
+	// ToolConnections reports the last observed connectivity state of each configured MCP server.
 	// +optional
-	MCPServers []SwarmAgentMCPStatus `json:"mcpServers,omitempty"`
+	// +listType=map
+	// +listMapKey=name
+	ToolConnections []SwarmAgentMCPStatus `json:"toolConnections,omitempty"`
 	// SystemPromptHash is the SHA-256 hex digest of the resolved system prompt last applied.
 	// +optional
 	SystemPromptHash string `json:"systemPromptHash,omitempty"`

@@ -80,22 +80,32 @@ spec:
                         one capability with exposeMCP: true.
                       properties:
                         name:
-                          description: Name of the referenced object.
+                          default: ""
+                          description: |-
+                            Name of the referent.
+                            This field is effectively required, but due to backwards compatibility is
+                            allowed to be empty. Instances of this type with an empty value here are
+                            almost certainly wrong.
+                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
                           type: string
-                      required:
-                      - name
                       type: object
+                      x-kubernetes-map-type: atomic
                     capabilityRef:
                       description: |-
                         CapabilityRef names a capability ID in the namespace's SwarmRegistry.
                         The operator resolves the MCP gateway URL at reconcile time.
                       properties:
                         name:
-                          description: Name of the referenced object.
+                          default: ""
+                          description: |-
+                            Name of the referent.
+                            This field is effectively required, but due to backwards compatibility is
+                            allowed to be empty. Instances of this type with an empty value here are
+                            almost certainly wrong.
+                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
                           type: string
-                      required:
-                      - name
                       type: object
+                      x-kubernetes-map-type: atomic
                     instructions:
                       description: |-
                         Instructions is operational context injected into the agent's system prompt
@@ -123,33 +133,9 @@ spec:
                   - message: exactly one of agentRef or capabilityRef must be set
                     rule: has(self.agentRef) != has(self.capabilityRef)
                 type: array
-              apiKeyRef:
-                description: |-
-                  APIKeyRef injects an LLM provider API key from a native Kubernetes Secret.
-                  The key is set as the environment variable named by the Secret key
-                  (e.g. key "ANTHROPIC_API_KEY" in Secret "my-keys" sets ANTHROPIC_API_KEY).
-                  For multiple keys or complex setups, use envFrom instead.
-                properties:
-                  key:
-                    description: The key of the secret to select from.  Must be a
-                      valid secret key.
-                    type: string
-                  name:
-                    default: ""
-                    description: |-
-                      Name of the referent.
-                      This field is effectively required, but due to backwards compatibility is
-                      allowed to be empty. Instances of this type with an empty value here are
-                      almost certainly wrong.
-                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                    type: string
-                  optional:
-                    description: Specify whether the Secret or its key must be defined
-                    type: boolean
-                required:
-                - key
-                type: object
-                x-kubernetes-map-type: atomic
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               capabilities:
                 description: |-
                   Capabilities advertises what this agent can do to SwarmRegistry and the MCP gateway.
@@ -195,55 +181,9 @@ spec:
                   - name
                   type: object
                 type: array
-              envFrom:
-                description: |-
-                  EnvFrom injects environment variables from Secrets or ConfigMaps into agent pods.
-                  Entries listed here take precedence over the global kubeswarm-api-keys Secret.
-                items:
-                  description: EnvFromSource represents the source of a set of ConfigMaps
-                    or Secrets
-                  properties:
-                    configMapRef:
-                      description: The ConfigMap to select from
-                      properties:
-                        name:
-                          default: ""
-                          description: |-
-                            Name of the referent.
-                            This field is effectively required, but due to backwards compatibility is
-                            allowed to be empty. Instances of this type with an empty value here are
-                            almost certainly wrong.
-                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                          type: string
-                        optional:
-                          description: Specify whether the ConfigMap must be defined
-                          type: boolean
-                      type: object
-                      x-kubernetes-map-type: atomic
-                    prefix:
-                      description: |-
-                        Optional text to prepend to the name of each environment variable.
-                        May consist of any printable ASCII characters except '='.
-                      type: string
-                    secretRef:
-                      description: The Secret to select from
-                      properties:
-                        name:
-                          default: ""
-                          description: |-
-                            Name of the referent.
-                            This field is effectively required, but due to backwards compatibility is
-                            allowed to be empty. Instances of this type with an empty value here are
-                            almost certainly wrong.
-                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                          type: string
-                        optional:
-                          description: Specify whether the Secret must be defined
-                          type: boolean
-                      type: object
-                      x-kubernetes-map-type: atomic
-                  type: object
-                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               guardrails:
                 description: Guardrails groups tool permissions, budget enforcement,
                   and execution limits.
@@ -254,11 +194,16 @@ spec:
                       When the budget is exhausted new tasks are rejected.
                     properties:
                       name:
-                        description: Name of the referenced object.
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
                         type: string
-                    required:
-                    - name
                     type: object
+                    x-kubernetes-map-type: atomic
                   limits:
                     description: Limits constrains per-agent resource and cost usage.
                     properties:
@@ -335,21 +280,197 @@ spec:
                         type: object
                     type: object
                 type: object
+              infrastructure:
+                description: |-
+                  Infrastructure groups cluster integration concerns: registry, network policy,
+                  API key injection, environment variables, and gRPC plugin overrides.
+                properties:
+                  apiKeyRef:
+                    description: |-
+                      APIKeyRef injects an LLM provider API key from a native Kubernetes Secret.
+                      The key is set as the environment variable named by the Secret key
+                      (e.g. key "ANTHROPIC_API_KEY" in Secret "my-keys" sets ANTHROPIC_API_KEY).
+                      For multiple keys or complex setups, use envFrom instead.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  envFrom:
+                    description: |-
+                      EnvFrom injects environment variables from Secrets or ConfigMaps into agent pods.
+                      Entries listed here take precedence over the global kubeswarm-api-keys Secret.
+                    items:
+                      description: EnvFromSource represents the source of a set of
+                        ConfigMaps or Secrets
+                      properties:
+                        configMapRef:
+                          description: The ConfigMap to select from
+                          properties:
+                            name:
+                              default: ""
+                              description: |-
+                                Name of the referent.
+                                This field is effectively required, but due to backwards compatibility is
+                                allowed to be empty. Instances of this type with an empty value here are
+                                almost certainly wrong.
+                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                              type: string
+                            optional:
+                              description: Specify whether the ConfigMap must be defined
+                              type: boolean
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        prefix:
+                          description: |-
+                            Optional text to prepend to the name of each environment variable.
+                            May consist of any printable ASCII characters except '='.
+                          type: string
+                        secretRef:
+                          description: The Secret to select from
+                          properties:
+                            name:
+                              default: ""
+                              description: |-
+                                Name of the referent.
+                                This field is effectively required, but due to backwards compatibility is
+                                allowed to be empty. Instances of this type with an empty value here are
+                                almost certainly wrong.
+                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                              type: string
+                            optional:
+                              description: Specify whether the Secret must be defined
+                              type: boolean
+                          type: object
+                          x-kubernetes-map-type: atomic
+                      type: object
+                    type: array
+                  networkPolicy:
+                    default: default
+                    description: |-
+                      NetworkPolicy controls the NetworkPolicy generated for agent pods.
+                      default: DNS + Redis + open HTTPS egress.
+                      strict:  DNS + Redis; HTTPS egress restricted to declared MCP server IPs.
+                      disabled: no NetworkPolicy generated (use when CNI manages policy externally).
+                    enum:
+                    - default
+                    - strict
+                    - disabled
+                    type: string
+                  plugins:
+                    description: Plugins configures external gRPC provider or queue
+                      overrides (RFC-0025).
+                    properties:
+                      llm:
+                        description: |-
+                          LLM is the host:port of an external gRPC LLM provider plugin.
+                          When set the agent uses the gRPC adapter instead of the built-in provider.
+                        properties:
+                          address:
+                            description: Address is the host:port of the gRPC plugin
+                              server.
+                            minLength: 1
+                            type: string
+                          tls:
+                            description: |-
+                              TLS configures mTLS for the gRPC connection.
+                              When not set the connection is plaintext.
+                            properties:
+                              secretRef:
+                                description: SecretRef names the Secret containing
+                                  the TLS credentials.
+                                properties:
+                                  name:
+                                    default: ""
+                                    description: |-
+                                      Name of the referent.
+                                      This field is effectively required, but due to backwards compatibility is
+                                      allowed to be empty. Instances of this type with an empty value here are
+                                      almost certainly wrong.
+                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                    type: string
+                                type: object
+                                x-kubernetes-map-type: atomic
+                            required:
+                            - secretRef
+                            type: object
+                        required:
+                        - address
+                        type: object
+                      queue:
+                        description: |-
+                          Queue is the host:port of an external gRPC task queue plugin.
+                          When set TASK_QUEUE_URL is ignored and the agent uses the gRPC queue adapter.
+                        properties:
+                          address:
+                            description: Address is the host:port of the gRPC plugin
+                              server.
+                            minLength: 1
+                            type: string
+                          tls:
+                            description: |-
+                              TLS configures mTLS for the gRPC connection.
+                              When not set the connection is plaintext.
+                            properties:
+                              secretRef:
+                                description: SecretRef names the Secret containing
+                                  the TLS credentials.
+                                properties:
+                                  name:
+                                    default: ""
+                                    description: |-
+                                      Name of the referent.
+                                      This field is effectively required, but due to backwards compatibility is
+                                      allowed to be empty. Instances of this type with an empty value here are
+                                      almost certainly wrong.
+                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                    type: string
+                                type: object
+                                x-kubernetes-map-type: atomic
+                            required:
+                            - secretRef
+                            type: object
+                        required:
+                        - address
+                        type: object
+                    type: object
+                  registryRef:
+                    description: |-
+                      RegistryRef names the SwarmRegistry this agent registers into.
+                      Defaults to "default". Omit to opt out of all registry indexing.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                type: object
               model:
                 description: Model is the LLM model ID (e.g. "claude-sonnet-4-6").
                 minLength: 1
-                type: string
-              networkPolicy:
-                default: default
-                description: |-
-                  NetworkPolicy controls the NetworkPolicy generated for agent pods.
-                  default: DNS + Redis + open HTTPS egress.
-                  strict:  DNS + Redis; HTTPS egress restricted to declared MCP server IPs.
-                  disabled: no NetworkPolicy generated (use when CNI manages policy externally).
-                enum:
-                - default
-                - strict
-                - disabled
                 type: string
               observability:
                 description: Observability groups health check, logging, and metrics
@@ -368,20 +489,22 @@ spec:
                           for AgentDegraded events.
                         properties:
                           name:
-                            description: Name of the referenced object.
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
                             type: string
-                        required:
-                        - name
                         type: object
+                        x-kubernetes-map-type: atomic
                       prompt:
                         description: Prompt is the message sent when type is semantic.
                         type: string
                       type:
                         default: semantic
-                        description: |-
-                          Type is the probe strategy.
-                          semantic: sends a prompt to the agent and evaluates the response via LLM.
-                          ping: sends an HTTP request to the agent's health endpoint.
+                        description: Type is the probe strategy.
                         enum:
                         - semantic
                         - ping
@@ -428,6 +551,10 @@ spec:
                           Emits log lines with msg="tool_call". Disabled by default to avoid noisy logs.
                         type: boolean
                     type: object
+                    x-kubernetes-validations:
+                    - message: redaction.secrets must be true when llmTurns is enabled
+                      rule: '!has(self.llmTurns) || !self.llmTurns || (has(self.redaction)
+                        && self.redaction.secrets)'
                   metrics:
                     description: Metrics controls Prometheus metrics exposure.
                     properties:
@@ -436,71 +563,6 @@ spec:
                         description: Enabled exposes a /metrics endpoint on the agent
                           pod for Prometheus scraping.
                         type: boolean
-                    type: object
-                type: object
-              plugins:
-                description: Plugins configures external gRPC provider or queue overrides
-                  (RFC-0025).
-                properties:
-                  llm:
-                    description: |-
-                      LLM is the host:port of an external gRPC LLM provider plugin.
-                      When set the agent uses the gRPC adapter instead of the built-in provider.
-                    properties:
-                      address:
-                        description: Address is the host:port of the gRPC plugin server.
-                        minLength: 1
-                        type: string
-                      tls:
-                        description: |-
-                          TLS configures mTLS for the gRPC connection.
-                          When not set the connection is plaintext.
-                        properties:
-                          secretRef:
-                            description: SecretRef names the Secret containing the
-                              TLS credentials.
-                            properties:
-                              name:
-                                description: Name of the referenced object.
-                                type: string
-                            required:
-                            - name
-                            type: object
-                        required:
-                        - secretRef
-                        type: object
-                    required:
-                    - address
-                    type: object
-                  queue:
-                    description: |-
-                      Queue is the host:port of an external gRPC task queue plugin.
-                      When set TASK_QUEUE_URL is ignored and the agent uses the gRPC queue adapter.
-                    properties:
-                      address:
-                        description: Address is the host:port of the gRPC plugin server.
-                        minLength: 1
-                        type: string
-                      tls:
-                        description: |-
-                          TLS configures mTLS for the gRPC connection.
-                          When not set the connection is plaintext.
-                        properties:
-                          secretRef:
-                            description: SecretRef names the Secret containing the
-                              TLS credentials.
-                            properties:
-                              name:
-                                description: Name of the referenced object.
-                                type: string
-                            required:
-                            - name
-                            type: object
-                        required:
-                        - secretRef
-                        type: object
-                    required:
-                    - address
                     type: object
                 type: object
               prompt:
@@ -575,18 +637,8 @@ spec:
                 x-kubernetes-validations:
                 - message: exactly one of inline or from must be set
                   rule: has(self.inline) != has(self.from)
-              registryRef:
-                description: |-
-                  RegistryRef names the SwarmRegistry this agent registers into.
-                  Defaults to "default". Omit to opt out of all registry indexing.
-                properties:
-                  name:
-                    description: Name of the referenced object.
-                    type: string
-                required:
-                - name
-                type: object
               runtime:
+                default: {}
                 description: Runtime groups replica count, autoscaling, resources,
                   and loop policy.
                 properties:
@@ -693,11 +745,16 @@ spec:
                               the vector backend.
                             properties:
                               name:
-                                description: Name of the referenced object.
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
                                 type: string
-                            required:
-                            - name
                             type: object
+                            x-kubernetes-map-type: atomic
                           retrieve:
                             description: |-
                               Retrieve enables fetching similar prior findings from the vector store before each tool call.
@@ -799,16 +856,25 @@ spec:
                   Settings references SwarmSettings objects whose fragments are composed into
                   this agent's system prompt, in list order. Last occurrence wins for duplicate keys.
                 items:
-                  description: LocalObjectReference identifies an object in the same
-                    namespace.
+                  description: |-
+                    LocalObjectReference contains enough information to let you locate the
+                    referenced object inside the same namespace.
                   properties:
                     name:
-                      description: Name of the referenced object.
+                      default: ""
+                      description: |-
+                        Name of the referent.
+                        This field is effectively required, but due to backwards compatibility is
+                        allowed to be empty. Instances of this type with an empty value here are
+                        almost certainly wrong.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
                       type: string
-                  required:
-                  - name
                   type: object
+                  x-kubernetes-map-type: atomic
                 type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               tools:
                 description: Tools groups MCP server connections and inline webhook
                   tools.
@@ -868,11 +934,16 @@ spec:
                                     the TLS credentials.
                                   properties:
                                     name:
-                                      description: Name of the referenced object.
+                                      default: ""
+                                      description: |-
+                                        Name of the referent.
+                                        This field is effectively required, but due to backwards compatibility is
+                                        allowed to be empty. Instances of this type with an empty value here are
+                                        almost certainly wrong.
+                                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
                                       type: string
-                                  required:
-                                  - name
                                   type: object
+                                  x-kubernetes-map-type: atomic
                               required:
                               - secretRef
                               type: object
@@ -936,6 +1007,9 @@ spec:
                                 set
                               rule: has(self.value) != has(self.secretKeyRef)
                           type: array
+                          x-kubernetes-list-map-keys:
+                          - name
+                          x-kubernetes-list-type: map
                         instructions:
                           description: |-
                             Instructions is operational context injected into the agent's system prompt
@@ -969,6 +1043,9 @@ spec:
                       - message: exactly one of url or capabilityRef must be set
                         rule: has(self.url) != has(self.capabilityRef)
                     type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                   webhooks:
                     description: Webhooks lists inline single-endpoint HTTP tools.
                     items:
@@ -1019,14 +1096,14 @@ spec:
                       - url
                       type: object
                     type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                 type: object
             required:
             - model
             - prompt
             type: object
-            x-kubernetes-validations:
-            - message: spec.prompt is required
-              rule: has(self.prompt)
           status:
             description: SwarmAgentStatus defines the observed state of SwarmAgent.
             properties:
@@ -1127,36 +1204,6 @@ spec:
                 items:
                   type: string
                 type: array
-              mcpServers:
-                description: MCPServers reports the last observed connectivity state
-                  of each configured MCP server.
-                items:
-                  description: SwarmAgentMCPStatus reports the last observed health
-                    of one MCP server.
-                  properties:
-                    healthy:
-                      description: Healthy is true when the last probe received a
-                        non-5xx HTTP response.
-                      type: boolean
-                    lastCheck:
-                      description: LastCheck is when the probe was last run.
-                      format: date-time
-                      type: string
-                    message:
-                      description: Message holds error detail when Healthy is false.
-                      type: string
-                    name:
-                      description: Name matches MCPToolSpec.name.
-                      type: string
-                    url:
-                      description: URL is the MCP server endpoint that was probed.
-                      type: string
-                  required:
-                  - healthy
-                  - name
-                  - url
-                  type: object
-                type: array
               observedGeneration:
                 description: ObservedGeneration is the .metadata.generation this status
                   reflects.
@@ -1181,6 +1228,39 @@ spec:
                 description: SystemPromptHash is the SHA-256 hex digest of the resolved
                   system prompt last applied.
                 type: string
+              toolConnections:
+                description: ToolConnections reports the last observed connectivity
+                  state of each configured MCP server.
+                items:
+                  description: SwarmAgentMCPStatus reports the last observed health
+                    of one MCP server.
+                  properties:
+                    healthy:
+                      description: |-
+                        Healthy is true when the last probe received a non-5xx HTTP response.
+                        Nil means the server has not been probed yet.
+                      type: boolean
+                    lastCheck:
+                      description: LastCheck is when the probe was last run.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message holds error detail when Healthy is false.
+                      type: string
+                    name:
+                      description: Name matches MCPToolSpec.name.
+                      type: string
+                    url:
+                      description: URL is the MCP server endpoint that was probed.
+                      type: string
+                  required:
+                  - name
+                  - url
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
             type: object
         required:
         - spec

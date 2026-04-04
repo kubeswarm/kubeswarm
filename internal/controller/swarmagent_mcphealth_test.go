@@ -78,12 +78,15 @@ var _ = Describe("SwarmAgent Controller - MCP health probes", func() {
 			_, err := r.reconcileMCPHealth(ctx, agent, servers)
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(agent.Status.MCPServers).To(HaveLen(1))
-			Expect(agent.Status.MCPServers[0].Healthy).To(BeTrue())
+			Expect(agent.Status.ToolConnections).To(HaveLen(1))
+			Expect(agent.Status.ToolConnections[0].Healthy).ToNot(BeNil())
+			Expect(*agent.Status.ToolConnections[0].Healthy).To(BeTrue())
 			Expect(apimeta.FindStatusCondition(agent.Status.Conditions, "MCPDegraded")).To(BeNil())
 		})
 
-		It("should set MCPDegraded when server returns 500", func() {
+		It("should mark reachable server as healthy even if it returns errors", func() {
+			// TCP dial probes reachability, not HTTP status. A server returning 500
+			// is still reachable and therefore healthy from a connectivity standpoint.
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusInternalServerError)
 			}))
@@ -104,18 +107,16 @@ var _ = Describe("SwarmAgent Controller - MCP health probes", func() {
 
 			r := newReconciler()
 			servers := []kubeswarmv1alpha1.MCPToolSpec{
-				{Name: "broken-server", URL: srv.URL},
+				{Name: "error-server", URL: srv.URL},
 			}
 			_, err := r.reconcileMCPHealth(ctx, agent, servers)
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(agent.Status.MCPServers).To(HaveLen(1))
-			Expect(agent.Status.MCPServers[0].Healthy).To(BeFalse())
-			Expect(agent.Status.MCPServers[0].Message).To(ContainSubstring("500"))
-
-			cond := apimeta.FindStatusCondition(agent.Status.Conditions, "MCPDegraded")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(agent.Status.ToolConnections).To(HaveLen(1))
+			Expect(agent.Status.ToolConnections[0].Healthy).ToNot(BeNil())
+			Expect(*agent.Status.ToolConnections[0].Healthy).To(BeTrue())
+			// TCP dial succeeds since server is listening - no MCPDegraded condition
+			Expect(apimeta.FindStatusCondition(agent.Status.Conditions, "MCPDegraded")).To(BeNil())
 		})
 
 		It("should treat 401 as healthy (auth required but reachable)", func() {
@@ -144,7 +145,8 @@ var _ = Describe("SwarmAgent Controller - MCP health probes", func() {
 			_, err := r.reconcileMCPHealth(ctx, agent, servers)
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(agent.Status.MCPServers[0].Healthy).To(BeTrue())
+			Expect(agent.Status.ToolConnections[0].Healthy).ToNot(BeNil())
+			Expect(*agent.Status.ToolConnections[0].Healthy).To(BeTrue())
 		})
 
 		It("should set MCPDegraded for unreachable server", func() {
@@ -168,7 +170,8 @@ var _ = Describe("SwarmAgent Controller - MCP health probes", func() {
 			_, err := r.reconcileMCPHealth(ctx, agent, servers)
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(agent.Status.MCPServers[0].Healthy).To(BeFalse())
+			Expect(agent.Status.ToolConnections[0].Healthy).ToNot(BeNil())
+			Expect(*agent.Status.ToolConnections[0].Healthy).To(BeFalse())
 			cond := apimeta.FindStatusCondition(agent.Status.Conditions, "MCPDegraded")
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
@@ -198,7 +201,7 @@ var _ = Describe("SwarmAgent Controller - MCP health probes", func() {
 			_, err := r.reconcileMCPHealth(ctx, agent, nil)
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(agent.Status.MCPServers).To(BeNil())
+			Expect(agent.Status.ToolConnections).To(BeNil())
 			Expect(apimeta.FindStatusCondition(agent.Status.Conditions, "MCPDegraded")).To(BeNil())
 		})
 
@@ -237,7 +240,8 @@ var _ = Describe("SwarmAgent Controller - MCP health probes", func() {
 			_, err := r.reconcileMCPHealth(ctx, agent, servers)
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(agent.Status.MCPServers[0].Healthy).To(BeTrue())
+			Expect(agent.Status.ToolConnections[0].Healthy).ToNot(BeNil())
+			Expect(*agent.Status.ToolConnections[0].Healthy).To(BeTrue())
 			Expect(apimeta.FindStatusCondition(agent.Status.Conditions, "MCPDegraded")).To(BeNil())
 		})
 	})
