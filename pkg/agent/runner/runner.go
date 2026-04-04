@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -45,8 +46,10 @@ import (
 var webhookClient = &http.Client{Timeout: 30 * time.Second}
 
 const (
-	submitSubtaskTool = "submit_subtask"
-	delegateTool      = "delegate"
+	submitSubtaskTool   = "submit_subtask"
+	delegateTool        = "delegate"
+	collectResultsTool  = "collect_results"
+	spawnAndCollectTool = "spawn_and_collect"
 )
 
 type contextKey int
@@ -122,6 +125,33 @@ func (r *Runner) buildTools() {
 			Description: "Enqueue a new agent task for asynchronous processing. Returns the assigned task ID.",
 			InputSchema: json.RawMessage(submitSchema),
 		})
+
+		// Built-in: collect_results (RFC-0029) — poll for completed results by task ID.
+		const collectSchema = `{"type":"object",` +
+			`"properties":{` +
+			`"task_ids":{"type":"array","items":{"type":"string"},"description":"Task IDs returned by submit_subtask or delegate"},` +
+			`"timeout_seconds":{"type":"integer","description":"Max seconds to wait for all results. Defaults to 120.","default":120}},` +
+			`"required":["task_ids"]}`
+		r.allTools = append(r.allTools, mcp.Tool{
+			Name:        collectResultsTool,
+			Description: "Wait for and collect results from previously submitted subtasks. Returns completed results and any still-pending task IDs.",
+			InputSchema: json.RawMessage(collectSchema),
+		})
+
+		// Built-in: spawn_and_collect (RFC-0029) — submit N tasks and collect all results.
+		const spawnSchema = `{"type":"object",` +
+			`"properties":{` +
+			`"tasks":{"type":"array","items":{"type":"object","properties":{` +
+			`"prompt":{"type":"string","description":"Task prompt to execute"},` +
+			`"role":{"type":"string","description":"Target role for delegation. Omit for self-queue."}},"required":["prompt"]},` +
+			`"description":"List of tasks to execute in parallel"},` +
+			`"timeout_seconds":{"type":"integer","description":"Max seconds to wait for all results. Defaults to 120.","default":120}},` +
+			`"required":["tasks"]}`
+		r.allTools = append(r.allTools, mcp.Tool{
+			Name:        spawnAndCollectTool,
+			Description: "Submit multiple tasks in parallel and wait for all results. Combines submit_subtask + collect_results in a single call.",
+			InputSchema: json.RawMessage(spawnSchema),
+		})
 	}
 
 	// Built-in: delegate — only available when the agent is part of an SwarmTeam.
@@ -158,7 +188,7 @@ func (r *Runner) AllTools() []mcp.Tool {
 // Priority: built-in → webhook → MCP.
 func (r *Runner) CallTool(ctx context.Context, toolName string, input json.RawMessage) (string, error) {
 	toolType := "mcp"
-	if toolName == submitSubtaskTool || toolName == delegateTool {
+	if toolName == submitSubtaskTool || toolName == delegateTool || toolName == collectResultsTool || toolName == spawnAndCollectTool {
 		toolType = "builtin"
 	} else if r.isWebhookTool(toolName) {
 		toolType = "webhook"
@@ -259,6 +289,29 @@ func (r *Runner) callToolInner(ctx context.Context, toolName string, input json.
 			r.k8sEvents.TaskDelegated(parentTaskID, args.Role, taskID)
 		}
 		return fmt.Sprintf("task delegated to role %q with id: %s", args.Role, taskID), nil
+	}
+
+	// Built-in: collect_results (RFC-0029) — poll for completed results by task ID.
+	if toolName == collectResultsTool && r.taskQueue != nil {
+		var args struct {
+			TaskIDs        []string `json:"task_ids"`
+			TimeoutSeconds int      `json:"timeout_seconds"`
+		}
+		if err := json.Unmarshal(input, &args); err != nil {
+			return "", fmt.Errorf("collect_results: invalid input: %w", err)
+		}
+		if args.TaskIDs == nil {
+			return "", fmt.Errorf("collect_results: task_ids is required")
+		}
+		if args.TimeoutSeconds <= 0 {
+			args.TimeoutSeconds = 120
+		}
+		return collectResultsFromQueue(ctx, r.taskQueue, args.TaskIDs, time.Duration(args.TimeoutSeconds)*time.Second)
+	}
+
+	// Built-in: spawn_and_collect (RFC-0029) — submit N tasks, then collect all results.
+	if toolName == spawnAndCollectTool && r.taskQueue != nil {
+		return r.handleSpawnAndCollect(ctx, input)
 	}
 
 	// Inline webhook tools.
@@ -380,6 +433,197 @@ func (r *Runner) buildCallTool(
 
 		return result, nil
 	}
+}
+
+// collectResults polls taskQueue.Results with exponential backoff until all task IDs
+// have results or the timeout/context expires. Returns JSON with completed and pending fields.
+// handleSpawnAndCollect implements the spawn_and_collect built-in tool (RFC-0029).
+// It submits multiple tasks (to self-queue or delegate queues), then collects all results.
+func (r *Runner) handleSpawnAndCollect(ctx context.Context, input json.RawMessage) (string, error) {
+	var args struct {
+		Tasks []struct {
+			Prompt string `json:"prompt"`
+			Role   string `json:"role"`
+		} `json:"tasks"`
+		TimeoutSeconds int `json:"timeout_seconds"`
+	}
+	if err := json.Unmarshal(input, &args); err != nil {
+		return "", fmt.Errorf("spawn_and_collect: invalid input: %w", err)
+	}
+	if args.TimeoutSeconds <= 0 {
+		args.TimeoutSeconds = 120
+	}
+
+	type submission struct {
+		ID     string
+		Prompt string
+		Queue  queue.TaskQueue
+	}
+	var submitted []submission
+	for _, task := range args.Tasks {
+		if strings.TrimSpace(task.Prompt) == "" {
+			return "", fmt.Errorf("spawn_and_collect: prompt must not be empty")
+		}
+		var tq queue.TaskQueue
+		if task.Role != "" {
+			dq, ok := r.delegateQueues[task.Role]
+			if !ok {
+				available := make([]string, 0, len(r.delegateQueues))
+				for role := range r.delegateQueues {
+					available = append(available, role)
+				}
+				return "", fmt.Errorf("spawn_and_collect: unknown role %q; available: %s", task.Role, strings.Join(available, ", "))
+			}
+			tq = dq
+		} else {
+			tq = r.taskQueue
+		}
+		taskID, err := tq.Submit(ctx, task.Prompt, nil)
+		if err != nil {
+			return "", fmt.Errorf("spawn_and_collect: submitting task: %w", err)
+		}
+		submitted = append(submitted, submission{ID: taskID, Prompt: task.Prompt, Queue: tq})
+	}
+
+	// Group by queue for collection.
+	type queueGroup struct {
+		queue   queue.TaskQueue
+		taskIDs []string
+	}
+	groupMap := map[queue.TaskQueue]*queueGroup{}
+	promptByID := make(map[string]string, len(submitted))
+	for _, s := range submitted {
+		promptByID[s.ID] = s.Prompt
+		g, ok := groupMap[s.Queue]
+		if !ok {
+			g = &queueGroup{queue: s.Queue}
+			groupMap[s.Queue] = g
+		}
+		g.taskIDs = append(g.taskIDs, s.ID)
+	}
+
+	// Collect results from each queue.
+	timeout := time.Duration(args.TimeoutSeconds) * time.Second
+	allCompleted := make(map[string]string)
+	var allPending []string
+	for _, g := range groupMap {
+		resultJSON, err := collectResultsFromQueue(ctx, g.queue, g.taskIDs, timeout)
+		if err != nil {
+			return "", err
+		}
+		var partial struct {
+			Completed map[string]string `json:"completed"`
+			Pending   []string          `json:"pending"`
+		}
+		if err := json.Unmarshal([]byte(resultJSON), &partial); err != nil {
+			continue
+		}
+		maps.Copy(allCompleted, partial.Completed)
+		allPending = append(allPending, partial.Pending...)
+	}
+	if allPending == nil {
+		allPending = []string{}
+	}
+
+	// Enrich completed results with the original prompt.
+	type enrichedResult struct {
+		Prompt string `json:"prompt"`
+		Output string `json:"output"`
+	}
+	enriched := make(map[string]enrichedResult, len(allCompleted))
+	for id, output := range allCompleted {
+		enriched[id] = enrichedResult{Prompt: promptByID[id], Output: output}
+	}
+
+	out, _ := json.Marshal(struct {
+		Completed map[string]enrichedResult `json:"completed"`
+		Pending   []string                  `json:"pending"`
+	}{Completed: enriched, Pending: allPending})
+	return string(out), nil
+}
+
+// collectResultsFromQueue polls a TaskQueue for completed results with exponential backoff
+// until all task IDs have results or the timeout/context expires. Returns JSON with
+// completed and pending fields.
+func collectResultsFromQueue(ctx context.Context, tq queue.TaskQueue, taskIDs []string, timeout time.Duration) (string, error) {
+	if len(taskIDs) == 0 {
+		out, _ := json.Marshal(struct {
+			Completed map[string]string `json:"completed"`
+			Pending   []string          `json:"pending"`
+		}{Completed: map[string]string{}, Pending: []string{}})
+		return string(out), nil
+	}
+
+	deadline := time.Now().Add(timeout)
+	completed := make(map[string]string, len(taskIDs))
+	backoff := time.Second
+
+	for {
+		// Build list of IDs still pending.
+		var pending []string
+		for _, id := range taskIDs {
+			if _, ok := completed[id]; !ok {
+				pending = append(pending, id)
+			}
+		}
+		if len(pending) == 0 {
+			break
+		}
+
+		// Check deadline and context before polling.
+		if time.Now().After(deadline) {
+			break
+		}
+		if ctx.Err() != nil {
+			break
+		}
+
+		results, err := tq.Results(ctx, pending)
+		if err != nil {
+			return "", fmt.Errorf("collect_results: polling queue: %w", err)
+		}
+		for _, tr := range results {
+			if tr.Error != "" {
+				completed[tr.TaskID] = fmt.Sprintf("[error] %s", tr.Error)
+			} else {
+				completed[tr.TaskID] = tr.Output
+			}
+		}
+
+		// Check if all done after this poll.
+		if len(completed) == len(taskIDs) {
+			break
+		}
+
+		// Exponential backoff capped at 10s.
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+		}
+		if backoff < 10*time.Second {
+			backoff *= 2
+			if backoff > 10*time.Second {
+				backoff = 10 * time.Second
+			}
+		}
+	}
+
+	// Build final pending list.
+	var finalPending []string
+	for _, id := range taskIDs {
+		if _, ok := completed[id]; !ok {
+			finalPending = append(finalPending, id)
+		}
+	}
+	if finalPending == nil {
+		finalPending = []string{}
+	}
+
+	out, _ := json.Marshal(struct {
+		Completed map[string]string `json:"completed"`
+		Pending   []string          `json:"pending"`
+	}{Completed: completed, Pending: finalPending})
+	return string(out), nil
 }
 
 // callWebhook invokes an inline HTTP webhook tool and returns the response body as text.
