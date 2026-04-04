@@ -199,7 +199,7 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		Provider:           os.Getenv("AGENT_PROVIDER"), // defaults to "anthropic" if empty
+		Provider:           os.Getenv("AGENT_PROVIDER"), // auto-detected from model if empty
 		Model:              model,
 		SystemPrompt:       systemPrompt,
 		TaskQueueURL:       queueURL,

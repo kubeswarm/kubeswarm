@@ -121,8 +121,6 @@ func Complete(ctx context.Context, model, systemPrompt, userMsg string, maxToken
 	return c.Complete(ctx, model, systemPrompt, userMsg, maxTokens)
 }
 
-const defaultProvider = "anthropic"
-
 var (
 	mu       sync.RWMutex
 	registry = map[string]func() LLMProvider{}
@@ -137,10 +135,10 @@ func Register(name string, factory func() LLMProvider) {
 }
 
 // New returns the LLMProvider for the given name.
-// An empty name defaults to "anthropic".
+// Callers should use Detect(model) to resolve the provider name when AGENT_PROVIDER is unset.
 func New(name string) (LLMProvider, error) {
 	if name == "" {
-		name = defaultProvider
+		return nil, fmt.Errorf("provider name is empty; set AGENT_PROVIDER or use Detect(model)")
 	}
 	mu.RLock()
 	factory, ok := registry[name]
@@ -163,7 +161,7 @@ func New(name string) (LLMProvider, error) {
 func Detect(model string) string {
 	switch {
 	case strings.HasPrefix(model, "claude-"):
-		return defaultProvider
+		return "anthropic"
 	case strings.HasPrefix(model, "gpt-"),
 		strings.HasPrefix(model, "o1"),
 		strings.HasPrefix(model, "o3"),

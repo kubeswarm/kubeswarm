@@ -86,7 +86,12 @@ func main() {
 	defer mcpManager.Close()
 
 	// Select LLM provider: external gRPC plugin takes precedence over built-in (RFC-0025).
+	// Auto-detect from model name when AGENT_PROVIDER is not explicitly set.
 	providerName := cfg.Provider
+	if providerName == "" {
+		providerName = providers.Detect(cfg.Model)
+		logger.Info("auto-detected provider from model", "model", cfg.Model, "provider", providerName)
+	}
 	if cfg.ExternalProviderAddr != "" {
 		providerName = "grpc"
 		logger.Info("using external gRPC LLM provider", "addr", cfg.ExternalProviderAddr)
