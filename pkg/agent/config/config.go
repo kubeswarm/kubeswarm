@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -184,7 +185,7 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	systemPrompt, err := requireEnv("AGENT_SYSTEM_PROMPT")
+	systemPrompt, err := loadSystemPrompt()
 	if err != nil {
 		return nil, err
 	}
@@ -337,6 +338,23 @@ func parseLoopPolicy() (*LoopPolicyConfig, error) {
 		lp.Memory.EmbeddingProvider = os.Getenv("AGENT_EMBEDDING_PROVIDER")
 	}
 	return &lp, nil
+}
+
+// loadSystemPrompt reads the system prompt from a file (AGENT_SYSTEM_PROMPT_PATH)
+// or falls back to the AGENT_SYSTEM_PROMPT env var for backward compatibility.
+func loadSystemPrompt() (string, error) {
+	if path := os.Getenv("AGENT_SYSTEM_PROMPT_PATH"); path != "" {
+		data, err := os.ReadFile(path) //nolint:gosec // path is a trusted operator-injected mount path
+		if err != nil {
+			return "", fmt.Errorf("reading system prompt from %s: %w", path, err)
+		}
+		prompt := strings.TrimSpace(string(data))
+		if prompt == "" {
+			return "", fmt.Errorf("system prompt file %s is empty", path)
+		}
+		return prompt, nil
+	}
+	return requireEnv("AGENT_SYSTEM_PROMPT")
 }
 
 func requireEnv(key string) (string, error) {

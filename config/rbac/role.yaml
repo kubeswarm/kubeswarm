@@ -8,11 +8,13 @@ rules:
   - ""
   resources:
   - configmaps
-  - pods
-  - secrets
+  - serviceaccounts
   verbs:
+  - create
   - get
   - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - ""
@@ -31,13 +33,11 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - serviceaccounts
+  - pods
+  - secrets
   verbs:
-  - create
   - get
   - list
-  - patch
-  - update
   - watch
 - apiGroups:
   - apps
