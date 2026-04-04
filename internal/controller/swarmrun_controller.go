@@ -146,6 +146,39 @@ func (r *SwarmRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.reconcileAgentRun(ctx, run, logger)
 	}
 
+	// Snapshot the parent SwarmTeam's pipeline/routing into the run spec if not already
+	// present. This handles manually created SwarmRuns (kubectl apply) that only set
+	// teamRef and input. SwarmEvent-created runs already have these fields populated.
+	if run.Spec.TeamRef != "" && len(run.Spec.Pipeline) == 0 && run.Spec.Routing == nil {
+		var team kubeswarmv1alpha1.SwarmTeam
+		if err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: run.Spec.TeamRef}, &team); err != nil {
+			if errors.IsNotFound(err) {
+				flow.SetRunCondition(run, metav1.ConditionFalse, "TeamNotFound",
+					fmt.Sprintf("SwarmTeam %q not found", run.Spec.TeamRef))
+				run.Status.Phase = kubeswarmv1alpha1.SwarmRunPhaseFailed
+				return ctrl.Result{}, r.Status().Update(ctx, run)
+			}
+			return ctrl.Result{}, fmt.Errorf("fetching team %q: %w", run.Spec.TeamRef, err)
+		}
+		run.Spec.TeamGeneration = team.Generation
+		run.Spec.Pipeline = team.Spec.Pipeline
+		run.Spec.Roles = team.Spec.Roles
+		run.Spec.Routing = team.Spec.Routing
+		run.Spec.DefaultContextPolicy = team.Spec.DefaultContextPolicy
+		if run.Spec.Output == "" {
+			run.Spec.Output = team.Spec.Output
+		}
+		if run.Spec.TimeoutSeconds == 0 {
+			run.Spec.TimeoutSeconds = team.Spec.TimeoutSeconds
+		}
+		if run.Spec.MaxTokens == 0 {
+			run.Spec.MaxTokens = team.Spec.MaxTokens
+		}
+		if err := r.Update(ctx, run); err != nil {
+			return ctrl.Result{}, fmt.Errorf("snapshotting team spec into run: %w", err)
+		}
+	}
+
 	// Initialize steps on first reconcile (idempotent — only populates empty slice).
 	if run.Spec.Routing != nil {
 		flow.InitializeRouteStep(run)

@@ -89,6 +89,12 @@ func UpdateRunPipelinePhase(f *kubeswarmv1alpha1.SwarmRun, templateData map[stri
 		return
 	}
 
+	// Guard: if there are no steps, the run is not ready to complete.
+	// This prevents marking an empty pipeline as Succeeded.
+	if len(f.Status.Steps) == 0 {
+		return
+	}
+
 	failed, allDone := false, true
 	for _, st := range f.Status.Steps {
 		switch st.Phase {
