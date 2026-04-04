@@ -55,87 +55,47 @@ type SwarmTeamRole struct {
 	// +optional
 	Model string `json:"model,omitempty"`
 
-	// SystemPrompt is the inline system prompt for an auto-created SwarmAgent.
-	//
-	// Deprecated for production use: inline prompts are stored directly in etcd
-	// and can exceed the 1.5 MB per-object limit when prompts are large or when
-	// many roles are defined in one SwarmTeam. Use SystemPromptRef instead for any
-	// prompt larger than ~50 KB or for any production workload.
-	//
-	// Inline prompts remain fully supported for local development, quickstart
-	// examples, and prompts under 50 KB.
+	// Prompt configures the system prompt for an inline role's auto-created SwarmAgent.
+	// Matches the SwarmAgent spec.prompt structure (inline or from ConfigMap/Secret).
 	// +optional
-	SystemPrompt string `json:"systemPrompt,omitempty"`
+	Prompt *AgentPrompt `json:"prompt,omitempty"`
 
-	// SystemPromptRef references a ConfigMap or Secret key whose content is used
-	// as the system prompt for this role's auto-created SwarmAgent. Takes precedence
-	// over SystemPrompt when both are set. Preferred for production workloads —
-	// prompt text is stored in a ConfigMap/Secret rather than in etcd as part of
-	// the SwarmTeam object, avoiding etcd size limits.
+	// Tools groups MCP server connections and inline webhook tools for an inline role.
+	// Matches the SwarmAgent spec.tools structure.
 	// +optional
-	SystemPromptRef *SystemPromptSource `json:"systemPromptRef,omitempty"`
+	Tools *AgentTools `json:"tools,omitempty"`
 
-	// MCPServers lists MCP tool servers for an inline role definition.
+	// Runtime groups replica count, autoscaling, and resources for an inline role.
 	// +optional
-	MCPServers []MCPToolSpec `json:"mcpServers,omitempty"`
-
-	// Tools lists inline HTTP webhook tools for an inline role definition.
-	// +optional
-	Tools []WebhookToolSpec `json:"tools,omitempty"`
-
-	// Replicas is the number of agent pods for an inline role definition.
-	// +kubebuilder:default=1
-	// +optional
-	Replicas *int32 `json:"replicas,omitempty"`
+	Runtime *AgentRuntime `json:"runtime,omitempty"`
 
 	// Limits constrains per-agent resource usage for an inline role definition.
 	// +optional
 	Limits *GuardrailLimits `json:"limits,omitempty"`
 
-	// Resources sets CPU and memory requests/limits for the agent pods of an inline role
-	// definition. When not set the operator injects safe defaults (requests: cpu=100m
-	// mem=128Mi; limits: cpu=500m mem=512Mi ephemeral-storage=256Mi). Set this field
-	// explicitly to tune for your workload's actual footprint.
-	// +optional
-	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
-
-	// Autoscaling configures KEDA-based autoscaling for an inline role's managed SwarmAgent.
-	// +optional
-	Autoscaling *SwarmAgentAutoscaling `json:"autoscaling,omitempty"`
-
 	// CanDelegate lists role names this role is permitted to call via delegate().
-	// Empty means this is a leaf role — it cannot delegate further.
+	// Empty means this is a leaf role - it cannot delegate further.
 	// +optional
 	CanDelegate []string `json:"canDelegate,omitempty"`
 
-	// SettingsRefs references one or more SwarmSettings whose fragments are composed into this
-	// role's system prompt, in list order. Only applies to inline roles (those with model +
-	// systemPrompt/systemPromptRef). For roles referencing an external SwarmAgent (swarmAgent: <name>),
-	// set settingsRefs on the SwarmAgent CR directly.
+	// Settings references SwarmSettings objects whose fragments are composed into this
+	// role's system prompt, in list order. Only applies to inline roles.
+	// For roles referencing an external SwarmAgent, set settings on the SwarmAgent CR directly.
 	// +optional
-	SettingsRefs []LocalObjectReference `json:"settingsRefs,omitempty"`
+	// +listType=map
+	// +listMapKey=name
+	Settings []LocalObjectReference `json:"settings,omitempty"`
 
 	// EnvFrom injects environment variables from Secrets or ConfigMaps into the agent pods
-	// created for this role. Use this to supply API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY,
-	// OPENAI_BASE_URL, etc.) on a per-role basis. Entries listed here take precedence over
-	// the global kubeswarm-api-keys Secret set via the Helm chart.
-	// Only applies to inline roles (those with model + systemPrompt/systemPromptRef).
+	// created for this role. Use this to supply API keys on a per-role basis.
+	// Only applies to inline roles.
 	// +optional
 	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
 
-	// ExternalProviderAddr is the host:port of an external gRPC LLM provider plugin (RFC-0025).
-	// When set, the agent for this role uses the gRPC adapter instead of the built-in provider.
-	// The operator injects this value as SWARM_PLUGIN_LLM_ADDR into the role's agent pods.
+	// Plugins configures external gRPC provider or queue overrides for this role (RFC-0025).
 	// Only applies to inline roles.
 	// +optional
-	ExternalProviderAddr string `json:"externalProviderAddr,omitempty"`
-
-	// ExternalQueueAddr is the host:port of an external gRPC task queue plugin (RFC-0025).
-	// When set, TASK_QUEUE_URL is ignored and the agent for this role uses the gRPC queue adapter.
-	// The operator injects this value as SWARM_PLUGIN_QUEUE_ADDR into the role's agent pods.
-	// Only applies to inline roles.
-	// +optional
-	ExternalQueueAddr string `json:"externalQueueAddr,omitempty"`
+	Plugins *AgentPlugins `json:"plugins,omitempty"`
 }
 
 // StepValidation configures output validation for a pipeline step.

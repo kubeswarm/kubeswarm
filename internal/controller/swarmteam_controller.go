@@ -433,7 +433,7 @@ func (r *SwarmTeamReconciler) reconcileRoles(
 			Name:          role.Name,
 			ReadyReplicas: agent.Status.ReadyReplicas,
 			DesiredReplicas: func() int32 {
-				if agent.Spec.Runtime != nil && agent.Spec.Runtime.Replicas != nil {
+				if agent.Spec.Runtime.Replicas != nil {
 					return *agent.Spec.Runtime.Replicas
 				}
 				return 1
@@ -466,7 +466,10 @@ func (r *SwarmTeamReconciler) reconcileRoleAgent(
 
 	// Inline role: auto-create SwarmAgent named "{team}-{role}".
 	agentName := team.Name + "-" + role.Name
-	replicas := role.Replicas
+	var replicas *int32
+	if role.Runtime != nil {
+		replicas = role.Runtime.Replicas
+	}
 
 	desired := &kubeswarmv1alpha1.SwarmAgent{
 		ObjectMeta: metav1.ObjectMeta{
@@ -478,25 +481,9 @@ func (r *SwarmTeamReconciler) reconcileRoleAgent(
 			},
 		},
 		Spec: kubeswarmv1alpha1.SwarmAgentSpec{
-			Model: role.Model,
-			Prompt: func() *kubeswarmv1alpha1.AgentPrompt {
-				if role.SystemPrompt != "" {
-					return &kubeswarmv1alpha1.AgentPrompt{Inline: role.SystemPrompt}
-				}
-				if role.SystemPromptRef != nil {
-					return &kubeswarmv1alpha1.AgentPrompt{From: role.SystemPromptRef}
-				}
-				return &kubeswarmv1alpha1.AgentPrompt{Inline: ""}
-			}(),
-			Tools: func() *kubeswarmv1alpha1.AgentTools {
-				if len(role.MCPServers) > 0 || len(role.Tools) > 0 {
-					return &kubeswarmv1alpha1.AgentTools{
-						MCP:      role.MCPServers,
-						Webhooks: role.Tools,
-					}
-				}
-				return nil
-			}(),
+			Model:  role.Model,
+			Prompt: role.Prompt,
+			Tools:  role.Tools,
 			Guardrails: func() *kubeswarmv1alpha1.AgentGuardrails {
 				g := &kubeswarmv1alpha1.AgentGuardrails{
 					Limits:    role.Limits,
@@ -507,39 +494,32 @@ func (r *SwarmTeamReconciler) reconcileRoleAgent(
 				}
 				return g
 			}(),
-			Runtime: func() *kubeswarmv1alpha1.AgentRuntime {
-				rt := &kubeswarmv1alpha1.AgentRuntime{
-					Replicas:    replicas,
-					Resources:   role.Resources,
-					Autoscaling: role.Autoscaling,
+			Runtime: func() kubeswarmv1alpha1.AgentRuntime {
+				if role.Runtime != nil {
+					rt := *role.Runtime
+					if rt.Replicas == nil {
+						rt.Replicas = replicas
+					}
+					return rt
 				}
-				if rt.Replicas == nil && rt.Resources == nil && rt.Autoscaling == nil {
-					return nil
-				}
-				return rt
+				return kubeswarmv1alpha1.AgentRuntime{Replicas: replicas}
 			}(),
-			Settings: role.SettingsRefs,
-			EnvFrom:  role.EnvFrom,
-			Plugins: func() *kubeswarmv1alpha1.AgentPlugins {
-				if role.ExternalProviderAddr == "" && role.ExternalQueueAddr == "" {
+			Settings: role.Settings,
+			Infrastructure: func() *kubeswarmv1alpha1.AgentInfrastructure {
+				infra := &kubeswarmv1alpha1.AgentInfrastructure{
+					EnvFrom: role.EnvFrom,
+					Plugins: role.Plugins,
+					RegistryRef: func() *kubeswarmv1alpha1.LocalObjectReference {
+						if team.Spec.RegistryRef == "" {
+							return nil
+						}
+						return &kubeswarmv1alpha1.LocalObjectReference{Name: team.Spec.RegistryRef}
+					}(),
+				}
+				if infra.EnvFrom == nil && infra.Plugins == nil && infra.RegistryRef == nil {
 					return nil
 				}
-				p := &kubeswarmv1alpha1.AgentPlugins{}
-				if role.ExternalProviderAddr != "" {
-					p.LLM = &kubeswarmv1alpha1.PluginEndpoint{Address: role.ExternalProviderAddr}
-				}
-				if role.ExternalQueueAddr != "" {
-					p.Queue = &kubeswarmv1alpha1.PluginEndpoint{Address: role.ExternalQueueAddr}
-				}
-				return p
-			}(),
-			// Propagate team-level policy refs so inline agents inherit the same
-			// registry and notification settings as their parent team.
-			RegistryRef: func() *kubeswarmv1alpha1.LocalObjectReference {
-				if team.Spec.RegistryRef == "" {
-					return nil
-				}
-				return &kubeswarmv1alpha1.LocalObjectReference{Name: team.Spec.RegistryRef}
+				return infra
 			}(),
 			Observability: func() *kubeswarmv1alpha1.AgentObservability {
 				if team.Spec.NotifyRef == nil {
@@ -547,7 +527,7 @@ func (r *SwarmTeamReconciler) reconcileRoleAgent(
 				}
 				return &kubeswarmv1alpha1.AgentObservability{
 					HealthCheck: &kubeswarmv1alpha1.AgentHealthCheck{
-						Type:      "semantic",
+						Type:      kubeswarmv1alpha1.HealthCheckSemantic,
 						NotifyRef: team.Spec.NotifyRef,
 					},
 				}
@@ -569,15 +549,9 @@ func (r *SwarmTeamReconciler) reconcileRoleAgent(
 	// Update spec in case role definition changed.
 	// Preserve spec.runtime.replicas when team autoscaling is enabled - the autoscaler owns replica count.
 	patch := client.MergeFrom(existing.DeepCopy())
-	var preservedReplicas *int32
-	if existing.Spec.Runtime != nil {
-		preservedReplicas = existing.Spec.Runtime.Replicas
-	}
+	preservedReplicas := existing.Spec.Runtime.Replicas
 	existing.Spec = desired.Spec
 	if team.Spec.Autoscaling != nil && team.Spec.Autoscaling.Enabled {
-		if existing.Spec.Runtime == nil {
-			existing.Spec.Runtime = &kubeswarmv1alpha1.AgentRuntime{}
-		}
 		existing.Spec.Runtime.Replicas = preservedReplicas
 	}
 	return agentName, r.Patch(ctx, existing, patch)
@@ -699,14 +673,16 @@ func (r *SwarmTeamReconciler) setCondition(
 }
 
 // setPromptSizeWarning sets or clears the SystemPromptSizeWarning condition based on the
-// total size of inline systemPrompts across all roles. A warning is surfaced when the
-// combined inline prompt bytes exceed 50 KB. Users should migrate to systemPromptRef to
+// total size of inline prompts across all roles. A warning is surfaced when the
+// combined inline prompt bytes exceed 50 KB. Users should migrate to prompt.from to
 // avoid approaching etcd's per-object size limit.
 func (r *SwarmTeamReconciler) setPromptSizeWarning(team *kubeswarmv1alpha1.SwarmTeam) {
-	const warnBytes = 50 * 1024 // 50 KB — mirrors webhook.promptWarnBytes
+	const warnBytes = 50 * 1024 // 50 KB - mirrors webhook.promptWarnBytes
 	var totalBytes int
 	for _, role := range team.Spec.Roles {
-		totalBytes += len(role.SystemPrompt)
+		if role.Prompt != nil {
+			totalBytes += len(role.Prompt.Inline)
+		}
 	}
 	if totalBytes > warnBytes {
 		apimeta.SetStatusCondition(&team.Status.Conditions, metav1.Condition{
@@ -715,8 +691,8 @@ func (r *SwarmTeamReconciler) setPromptSizeWarning(team *kubeswarmv1alpha1.Swarm
 			ObservedGeneration: team.Generation,
 			Reason:             "InlinePromptTooLarge",
 			Message: fmt.Sprintf(
-				"total inline systemPrompt size is %d KB (> 50 KB). "+
-					"Move prompts to ConfigMaps and reference them via spec.roles[*].systemPromptRef.configMapKeyRef "+
+				"total inline prompt size is %d KB (> 50 KB). "+
+					"Move prompts to ConfigMaps and reference them via spec.roles[*].prompt.from.configMapKeyRef "+
 					"to avoid etcd object size limits.",
 				totalBytes/1024,
 			),
@@ -886,13 +862,13 @@ func (r *SwarmTeamReconciler) computeRoleDesired(
 		}
 		return 0, false, fmt.Errorf("fetching SwarmAgent %q for autoscaling: %w", agentName, err)
 	}
-	if agent.Spec.Runtime != nil && agent.Spec.Runtime.Autoscaling != nil {
+	if agent.Spec.Runtime.Autoscaling != nil {
 		return 0, true, nil // KEDA owns this agent's replicas
 	}
 
 	configuredReplicas := int32(1)
-	if role.Replicas != nil {
-		configuredReplicas = *role.Replicas
+	if role.Runtime != nil && role.Runtime.Replicas != nil {
+		configuredReplicas = *role.Runtime.Replicas
 	}
 	maxConcurrent := int32(5)
 	if role.Limits != nil && role.Limits.ConcurrentTasks > 0 {
@@ -929,15 +905,12 @@ func (r *SwarmTeamReconciler) applyRoleScale(
 	}
 
 	currentReplicas := int32(1)
-	if agent.Spec.Runtime != nil && agent.Spec.Runtime.Replicas != nil {
+	if agent.Spec.Runtime.Replicas != nil {
 		currentReplicas = *agent.Spec.Runtime.Replicas
 	}
 
 	if currentReplicas != desired {
 		patch := client.MergeFrom(agent.DeepCopy())
-		if agent.Spec.Runtime == nil {
-			agent.Spec.Runtime = &kubeswarmv1alpha1.AgentRuntime{}
-		}
 		agent.Spec.Runtime.Replicas = &desired
 		if err := r.Patch(ctx, agent, patch); err != nil {
 			return fmt.Errorf("autoscaling SwarmAgent %q to %d replicas: %w", agentName, desired, err)
