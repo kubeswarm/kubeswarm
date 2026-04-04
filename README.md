@@ -2,6 +2,8 @@
   <img src="https://assets.kubeswarm.io/logo.svg" width="200" alt="kubeswarm - orchestrate. scale. swarm.">
 </p>
 
+<h3 align="center">kubeswarm - orchestrate • scale • swarm.</h3>
+
 <p align="center">
   <a href="https://github.com/kubeswarm/kubeswarm/actions/workflows/ci.yml"><img src="https://github.com/kubeswarm/kubeswarm/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/kubeswarm/kubeswarm/releases"><img src="https://img.shields.io/github/v/release/kubeswarm/kubeswarm" alt="GitHub release"></a>
