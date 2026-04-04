@@ -101,7 +101,7 @@ func fakeClient(objs ...client.Object) client.Client {
 func TestAgentPrompt_SmallInline_Allowed(t *testing.T) {
 	v := NewSwarmAgentPromptValidator(agentDecoder(), fakeClient())
 	agent := minimalAgent("You are a test agent.")
-	agent.Spec.Runtime = &kubeswarmv1alpha1.AgentRuntime{
+	agent.Spec.Runtime = kubeswarmv1alpha1.AgentRuntime{
 		Resources: &corev1.ResourceRequirements{},
 	}
 	resp := v.Handle(context.Background(), buildAgentRequest(agent, nil))
@@ -136,7 +136,7 @@ func TestAgentPrompt_Over50KB_Warns(t *testing.T) {
 	v := NewSwarmAgentPromptValidator(agentDecoder(), fakeClient())
 	bigPrompt := strings.Repeat("x", 60*1024) // 60 KB
 	agent := minimalAgent(bigPrompt)
-	agent.Spec.Runtime = &kubeswarmv1alpha1.AgentRuntime{
+	agent.Spec.Runtime = kubeswarmv1alpha1.AgentRuntime{
 		Resources: &corev1.ResourceRequirements{},
 	}
 	resp := v.Handle(context.Background(), buildAgentRequest(agent, nil))
@@ -189,7 +189,7 @@ func TestAgentPrompt_NilPrompt_Allowed(t *testing.T) {
 func TestAgentPrompt_Immutability_NoChange_Allowed(t *testing.T) {
 	v := NewSwarmAgentPromptValidator(agentDecoder(), fakeClient())
 	agent := minimalAgent("same prompt")
-	agent.Spec.Runtime = &kubeswarmv1alpha1.AgentRuntime{Resources: &corev1.ResourceRequirements{}}
+	agent.Spec.Runtime = kubeswarmv1alpha1.AgentRuntime{Resources: &corev1.ResourceRequirements{}}
 	old := minimalAgent("same prompt")
 	resp := v.Handle(context.Background(), buildAgentRequest(agent, old))
 	if !resp.Allowed {
@@ -202,7 +202,7 @@ func TestAgentPrompt_Immutability_Changed_Denied(t *testing.T) {
 	fc := fakeClient()
 	v := NewSwarmAgentPromptValidator(agentDecoder(), fc)
 	agent := minimalAgent("new prompt")
-	agent.Spec.Runtime = &kubeswarmv1alpha1.AgentRuntime{Resources: &corev1.ResourceRequirements{}}
+	agent.Spec.Runtime = kubeswarmv1alpha1.AgentRuntime{Resources: &corev1.ResourceRequirements{}}
 	old := minimalAgent("old prompt")
 	resp := v.Handle(context.Background(), buildAgentRequest(agent, old))
 	// SAR Create on fake client will fail (no reactor), so we get a warning, not a deny.
@@ -234,7 +234,7 @@ func TestAgentPrompt_Immutability_Changed_Denied(t *testing.T) {
 func TestAgentMCP_NoMCPServers_Allowed(t *testing.T) {
 	v := NewSwarmAgentPromptValidator(agentDecoder(), fakeClient())
 	agent := minimalAgent("test")
-	agent.Spec.Runtime = &kubeswarmv1alpha1.AgentRuntime{Resources: &corev1.ResourceRequirements{}}
+	agent.Spec.Runtime = kubeswarmv1alpha1.AgentRuntime{Resources: &corev1.ResourceRequirements{}}
 	// No Tools.MCP set
 	resp := v.Handle(context.Background(), buildAgentRequest(agent, nil))
 	if !resp.Allowed {
@@ -253,7 +253,7 @@ func TestAgentMCP_URLInAllowlist_Allowed(t *testing.T) {
 	}
 	v := NewSwarmAgentPromptValidator(agentDecoder(), fakeClient(settings))
 	agent := minimalAgent("test")
-	agent.Spec.Runtime = &kubeswarmv1alpha1.AgentRuntime{Resources: &corev1.ResourceRequirements{}}
+	agent.Spec.Runtime = kubeswarmv1alpha1.AgentRuntime{Resources: &corev1.ResourceRequirements{}}
 	agent.Spec.Tools = &kubeswarmv1alpha1.AgentTools{
 		MCP: []kubeswarmv1alpha1.MCPToolSpec{
 			{Name: "good", URL: "https://allowed.example.com/sse"},
@@ -326,7 +326,7 @@ func TestAgentMCP_RequireAuth_WithBearer_Allowed(t *testing.T) {
 	}
 	v := NewSwarmAgentPromptValidator(agentDecoder(), fakeClient(settings))
 	agent := minimalAgent("test")
-	agent.Spec.Runtime = &kubeswarmv1alpha1.AgentRuntime{Resources: &corev1.ResourceRequirements{}}
+	agent.Spec.Runtime = kubeswarmv1alpha1.AgentRuntime{Resources: &corev1.ResourceRequirements{}}
 	agent.Spec.Tools = &kubeswarmv1alpha1.AgentTools{
 		MCP: []kubeswarmv1alpha1.MCPToolSpec{
 			{
@@ -360,7 +360,7 @@ func TestAgentMCP_RequireAuth_WithMTLS_Allowed(t *testing.T) {
 	}
 	v := NewSwarmAgentPromptValidator(agentDecoder(), fakeClient(settings))
 	agent := minimalAgent("test")
-	agent.Spec.Runtime = &kubeswarmv1alpha1.AgentRuntime{Resources: &corev1.ResourceRequirements{}}
+	agent.Spec.Runtime = kubeswarmv1alpha1.AgentRuntime{Resources: &corev1.ResourceRequirements{}}
 	agent.Spec.Tools = &kubeswarmv1alpha1.AgentTools{
 		MCP: []kubeswarmv1alpha1.MCPToolSpec{
 			{
@@ -390,7 +390,7 @@ func TestTeamPrompt_SmallPrompts_Allowed(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 		Spec: kubeswarmv1alpha1.SwarmTeamSpec{
 			Roles: []kubeswarmv1alpha1.SwarmTeamRole{
-				{Name: "worker", SystemPrompt: "You are a worker."},
+				{Name: "worker", Prompt: &kubeswarmv1alpha1.AgentPrompt{Inline: "You are a worker."}},
 			},
 		},
 	}
@@ -406,7 +406,7 @@ func TestTeamPrompt_PerRole_Over512KB_Denied(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 		Spec: kubeswarmv1alpha1.SwarmTeamSpec{
 			Roles: []kubeswarmv1alpha1.SwarmTeamRole{
-				{Name: "big-role", SystemPrompt: strings.Repeat("x", 520*1024)},
+				{Name: "big-role", Prompt: &kubeswarmv1alpha1.AgentPrompt{Inline: strings.Repeat("x", 520*1024)}},
 			},
 		},
 	}
@@ -425,7 +425,7 @@ func TestTeamPrompt_PerRole_Over50KB_Warns(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 		Spec: kubeswarmv1alpha1.SwarmTeamSpec{
 			Roles: []kubeswarmv1alpha1.SwarmTeamRole{
-				{Name: "medium-role", SystemPrompt: strings.Repeat("x", 60*1024)},
+				{Name: "medium-role", Prompt: &kubeswarmv1alpha1.AgentPrompt{Inline: strings.Repeat("x", 60*1024)}},
 			},
 		},
 	}
@@ -445,9 +445,9 @@ func TestTeamPrompt_TotalOver800KB_Denied(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 		Spec: kubeswarmv1alpha1.SwarmTeamSpec{
 			Roles: []kubeswarmv1alpha1.SwarmTeamRole{
-				{Name: "a", SystemPrompt: strings.Repeat("x", 300*1024)},
-				{Name: "b", SystemPrompt: strings.Repeat("x", 300*1024)},
-				{Name: "c", SystemPrompt: strings.Repeat("x", 300*1024)},
+				{Name: "a", Prompt: &kubeswarmv1alpha1.AgentPrompt{Inline: strings.Repeat("x", 300*1024)}},
+				{Name: "b", Prompt: &kubeswarmv1alpha1.AgentPrompt{Inline: strings.Repeat("x", 300*1024)}},
+				{Name: "c", Prompt: &kubeswarmv1alpha1.AgentPrompt{Inline: strings.Repeat("x", 300*1024)}},
 			},
 		},
 	}

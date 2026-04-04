@@ -61,7 +61,7 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
 					Model:   "claude-sonnet-4-6",
 					Prompt:  &kubeswarmv1alpha1.AgentPrompt{Inline: "test"},
-					Runtime: &kubeswarmv1alpha1.AgentRuntime{Replicas: &replicas},
+					Runtime: kubeswarmv1alpha1.AgentRuntime{Replicas: &replicas},
 				},
 			}
 			dep := buildTestDeployment(agent)
@@ -75,7 +75,7 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
 					Model:   "claude-sonnet-4-6",
 					Prompt:  &kubeswarmv1alpha1.AgentPrompt{Inline: "test"},
-					Runtime: &kubeswarmv1alpha1.AgentRuntime{Replicas: &replicas},
+					Runtime: kubeswarmv1alpha1.AgentRuntime{Replicas: &replicas},
 				},
 			}
 			// Set BudgetExceeded condition.
@@ -95,7 +95,7 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
 					Model:   "claude-sonnet-4-6",
 					Prompt:  &kubeswarmv1alpha1.AgentPrompt{Inline: "test"},
-					Runtime: &kubeswarmv1alpha1.AgentRuntime{Replicas: &replicas},
+					Runtime: kubeswarmv1alpha1.AgentRuntime{Replicas: &replicas},
 				},
 			}
 			apimeta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
@@ -138,7 +138,7 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
 					Model:  "claude-sonnet-4-6",
 					Prompt: &kubeswarmv1alpha1.AgentPrompt{Inline: "test"},
-					Runtime: &kubeswarmv1alpha1.AgentRuntime{
+					Runtime: kubeswarmv1alpha1.AgentRuntime{
 						Resources: &corev1.ResourceRequirements{
 							Requests: corev1.ResourceList{
 								corev1.ResourceCPU:    resource.MustParse("200m"),

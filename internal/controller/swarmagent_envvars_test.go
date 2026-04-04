@@ -41,7 +41,7 @@ func envVal(envs []corev1.EnvVar, name string) (string, bool) {
 // buildTestEnvVars calls the production buildEnvVars with minimal dependencies.
 func buildTestEnvVars(agent *kubeswarmv1alpha1.SwarmAgent, mcpServers []kubeswarmv1alpha1.MCPToolSpec) []corev1.EnvVar {
 	r := &SwarmAgentReconciler{AgentImage: "test:latest"}
-	return r.buildEnvVars(agent, "assembled prompt", nil, nil, nil, mcpServers)
+	return r.buildEnvVars(agent, nil, nil, nil, mcpServers)
 }
 
 var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", func() {
@@ -316,9 +316,11 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
 					Model:  "claude-sonnet-4-6",
 					Prompt: &kubeswarmv1alpha1.AgentPrompt{Inline: "test"},
-					Plugins: &kubeswarmv1alpha1.AgentPlugins{
-						LLM:   &kubeswarmv1alpha1.PluginEndpoint{Address: "llm.svc:50051"},
-						Queue: &kubeswarmv1alpha1.PluginEndpoint{Address: "queue.svc:50052"},
+					Infrastructure: &kubeswarmv1alpha1.AgentInfrastructure{
+						Plugins: &kubeswarmv1alpha1.AgentPlugins{
+							LLM:   &kubeswarmv1alpha1.PluginEndpoint{Address: "llm.svc:50051"},
+							Queue: &kubeswarmv1alpha1.PluginEndpoint{Address: "queue.svc:50052"},
+						},
 					},
 				},
 			}
@@ -359,7 +361,7 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
 					Model:  "claude-sonnet-4-6",
 					Prompt: &kubeswarmv1alpha1.AgentPrompt{Inline: "test"},
-					Runtime: &kubeswarmv1alpha1.AgentRuntime{
+					Runtime: kubeswarmv1alpha1.AgentRuntime{
 						Loop: &kubeswarmv1alpha1.AgentLoopPolicy{
 							Dedup: true,
 							Compression: &kubeswarmv1alpha1.LoopCompressionConfig{

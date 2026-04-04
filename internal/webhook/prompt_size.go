@@ -71,7 +71,10 @@ func (v *SwarmTeamPromptValidator) Handle(_ context.Context, req admission.Reque
 	var totalBytes int
 
 	for _, role := range team.Spec.Roles {
-		size := len(role.SystemPrompt)
+		if role.Prompt == nil {
+			continue
+		}
+		size := len(role.Prompt.Inline)
 		if size == 0 {
 			continue
 		}
@@ -154,7 +157,7 @@ func (v *SwarmAgentPromptValidator) Handle(ctx context.Context, req admission.Re
 	// Warn when spec.runtime.resources is not set. The operator injects safe defaults
 	// (cpu: 100m/500m, memory: 128Mi/512Mi, ephemeral-storage: 256Mi) but
 	// explicit limits are recommended to match your workload's actual footprint.
-	if agent.Spec.Runtime == nil || agent.Spec.Runtime.Resources == nil {
+	if agent.Spec.Runtime.Resources == nil {
 		warnings = append(warnings,
 			"spec.runtime.resources is not set; the operator will inject default limits "+
 				"(requests: cpu=100m mem=128Mi; limits: cpu=500m mem=512Mi ephemeral-storage=256Mi). "+

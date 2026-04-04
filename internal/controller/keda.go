@@ -27,6 +27,7 @@ import (
 	"strconv"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -51,7 +52,14 @@ const defaultTaskStream = "agent-tasks"
 func (r *SwarmAgentReconciler) reconcileKEDA(ctx context.Context, agent *kubeswarmv1alpha1.SwarmAgent) error {
 	logger := log.FromContext(ctx)
 
-	if agent.Spec.Runtime == nil || agent.Spec.Runtime.Autoscaling == nil {
+	// When budget is exceeded, buildDeployment sets replicas=0. Delete the
+	// ScaledObject so KEDA's minReplicas does not override the scale-to-zero.
+	// The next reconcile after BudgetExceeded clears will recreate it.
+	if apimeta.IsStatusConditionTrue(agent.Status.Conditions, "BudgetExceeded") {
+		return r.deleteScaledObjectIfExists(ctx, agent)
+	}
+
+	if agent.Spec.Runtime.Autoscaling == nil {
 		return r.deleteScaledObjectIfExists(ctx, agent)
 	}
 
@@ -197,24 +205,24 @@ func stripStreamParam(rawURL string) string {
 }
 
 func minReplicas(agent *kubeswarmv1alpha1.SwarmAgent) int32 {
-	if agent.Spec.Runtime != nil && agent.Spec.Runtime.Autoscaling != nil && agent.Spec.Runtime.Autoscaling.MinReplicas != nil {
+	if agent.Spec.Runtime.Autoscaling != nil && agent.Spec.Runtime.Autoscaling.MinReplicas != nil {
 		return *agent.Spec.Runtime.Autoscaling.MinReplicas
 	}
-	if agent.Spec.Runtime != nil && agent.Spec.Runtime.Replicas != nil {
+	if agent.Spec.Runtime.Replicas != nil {
 		return *agent.Spec.Runtime.Replicas
 	}
 	return 1
 }
 
 func maxReplicas(agent *kubeswarmv1alpha1.SwarmAgent) int32 {
-	if agent.Spec.Runtime != nil && agent.Spec.Runtime.Autoscaling != nil && agent.Spec.Runtime.Autoscaling.MaxReplicas != nil {
+	if agent.Spec.Runtime.Autoscaling != nil && agent.Spec.Runtime.Autoscaling.MaxReplicas != nil {
 		return *agent.Spec.Runtime.Autoscaling.MaxReplicas
 	}
 	return 10
 }
 
 func targetPendingTasks(agent *kubeswarmv1alpha1.SwarmAgent) int32 {
-	if agent.Spec.Runtime != nil && agent.Spec.Runtime.Autoscaling != nil && agent.Spec.Runtime.Autoscaling.TargetPendingTasks != nil {
+	if agent.Spec.Runtime.Autoscaling != nil && agent.Spec.Runtime.Autoscaling.TargetPendingTasks != nil {
 		return *agent.Spec.Runtime.Autoscaling.TargetPendingTasks
 	}
 	return defaultPendingTasks

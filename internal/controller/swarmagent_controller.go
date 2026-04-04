@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"net/http"
 	neturl "net/url"
 	"os"
 	"slices"
@@ -103,7 +102,7 @@ func defaultAgentResources() corev1.ResourceRequirements {
 // limit is always injected - even into custom resource specs - to prevent /tmp exhaustion
 // on a readOnlyRootFilesystem pod where /tmp is the only writable path.
 func agentResources(swarmAgent *kubeswarmv1alpha1.SwarmAgent) corev1.ResourceRequirements {
-	if swarmAgent.Spec.Runtime == nil || swarmAgent.Spec.Runtime.Resources == nil {
+	if swarmAgent.Spec.Runtime.Resources == nil {
 		return defaultAgentResources()
 	}
 	r := *swarmAgent.Spec.Runtime.Resources
@@ -147,7 +146,7 @@ type SwarmAgentReconciler struct {
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmruns,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch
@@ -184,7 +183,7 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// 3b. Optionally load the referenced SwarmMemory.
 	var swarmMemory *kubeswarmv1alpha1.SwarmMemory
-	if swarmAgent.Spec.Runtime != nil && swarmAgent.Spec.Runtime.Loop != nil &&
+	if swarmAgent.Spec.Runtime.Loop != nil &&
 		swarmAgent.Spec.Runtime.Loop.Memory != nil && swarmAgent.Spec.Runtime.Loop.Memory.Ref != nil {
 		mem := &kubeswarmv1alpha1.SwarmMemory{}
 		if err := r.Get(ctx, client.ObjectKey{
@@ -255,6 +254,16 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
+	// 5b. Reconcile the prompt ConfigMap so the system prompt is mounted as a file
+	// instead of injected as an env var (avoids size limits and plaintext exposure).
+	assembledPrompt := assembleSystemPrompt(resolvedPrompt, allSettings, resolvedMCPServers)
+	if err := r.reconcilePromptConfigMap(ctx, swarmAgent, assembledPrompt); err != nil {
+		logger.Error(err, "failed to reconcile prompt ConfigMap")
+		r.setCondition(swarmAgent, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "ReconcileError", err.Error())
+		_ = r.Status().Update(ctx, swarmAgent)
+		return ctrl.Result{}, err
+	}
+
 	// 6. Reconcile the owned k8s Deployment (budget check may override replicas to 0).
 	if err := r.reconcileDeployment(ctx, swarmAgent, allSettings, swarmMemory, resolvedPrompt, apiKeyEnvVar, apiKeyVersion, resolvedMCPServers); err != nil {
 		logger.Error(err, "failed to reconcile Deployment")
@@ -271,12 +280,22 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
+	// 7b. Strict NetworkPolicy bakes DNS-resolved IPs at reconcile time. Force periodic
+	// re-resolution so the policy stays current when MCP server IPs rotate.
+	if swarmAgent.Spec.Infrastructure != nil &&
+		swarmAgent.Spec.Infrastructure.NetworkPolicy == kubeswarmv1alpha1.NetworkPolicyModeStrict {
+		const strictRequeue = 5 * time.Minute
+		if requeueAfter == 0 || strictRequeue < requeueAfter {
+			requeueAfter = strictRequeue
+		}
+	}
+
 	// 8. Sync status.readyReplicas from the owned Deployment.
 	if err := r.syncStatus(ctx, swarmAgent); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// 8. Probe MCP server health and surface results in status.mcpServers[].
+	// 8. Probe MCP server health and surface results in status.toolConnections[].
 	mcpRequeue, err := r.reconcileMCPHealth(ctx, swarmAgent, resolvedMCPServers)
 	if err != nil {
 		logger.Error(err, "failed to reconcile MCP health")
@@ -343,6 +362,54 @@ func (r *SwarmAgentReconciler) reconcileDeployment(
 	return r.Patch(ctx, existing, patch)
 }
 
+const (
+	promptConfigMapKey = "system-prompt.txt"
+	promptVolumeName   = "system-prompt"
+	promptMountPath    = "/etc/swarm/prompt"
+	promptFilePath     = promptMountPath + "/" + promptConfigMapKey
+)
+
+// reconcilePromptConfigMap creates or updates a ConfigMap containing the assembled system prompt.
+// The prompt is mounted as a file into agent pods instead of being injected as an env var,
+// avoiding env var size limits and plaintext exposure in kubectl describe.
+func (r *SwarmAgentReconciler) reconcilePromptConfigMap(
+	ctx context.Context,
+	swarmAgent *kubeswarmv1alpha1.SwarmAgent,
+	assembledPrompt string,
+) error {
+	cmName := swarmAgent.Name + "-prompt"
+	desired := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cmName,
+			Namespace: swarmAgent.Namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/name":       "agent",
+				"app.kubernetes.io/instance":   swarmAgent.Name,
+				"app.kubernetes.io/managed-by": "kubeswarm",
+			},
+		},
+		Data: map[string]string{
+			promptConfigMapKey: assembledPrompt,
+		},
+	}
+	if err := ctrl.SetControllerReference(swarmAgent, desired, r.Scheme); err != nil {
+		return err
+	}
+
+	existing := &corev1.ConfigMap{}
+	err := r.Get(ctx, client.ObjectKey{Name: cmName, Namespace: swarmAgent.Namespace}, existing)
+	if errors.IsNotFound(err) {
+		return r.Create(ctx, desired)
+	}
+	if err != nil {
+		return err
+	}
+
+	patch := client.MergeFrom(existing.DeepCopy())
+	existing.Data = desired.Data
+	return r.Patch(ctx, existing, patch)
+}
+
 // reconcileNetworkPolicy creates, updates, or deletes the NetworkPolicy for an agent
 // Deployment depending on spec.networkPolicy (RFC-0016 Phase 2).
 func (r *SwarmAgentReconciler) reconcileNetworkPolicy(
@@ -351,8 +418,8 @@ func (r *SwarmAgentReconciler) reconcileNetworkPolicy(
 	resolvedMCPServers []kubeswarmv1alpha1.MCPToolSpec,
 ) error {
 	mode := kubeswarmv1alpha1.NetworkPolicyModeDefault
-	if swarmAgent.Spec.NetworkPolicy != "" {
-		mode = swarmAgent.Spec.NetworkPolicy
+	if swarmAgent.Spec.Infrastructure != nil && swarmAgent.Spec.Infrastructure.NetworkPolicy != "" {
+		mode = swarmAgent.Spec.Infrastructure.NetworkPolicy
 	}
 
 	npName := swarmAgent.Name + "-netpol"
@@ -554,7 +621,7 @@ func (r *SwarmAgentReconciler) buildDeployment(swarmAgent *kubeswarmv1alpha1.Swa
 	}
 
 	replicas := int32(1)
-	if swarmAgent.Spec.Runtime != nil && swarmAgent.Spec.Runtime.Replicas != nil {
+	if swarmAgent.Spec.Runtime.Replicas != nil {
 		replicas = *swarmAgent.Spec.Runtime.Replicas
 	}
 	// Budget enforcement: scale to 0 while the daily token limit is exceeded.
@@ -611,17 +678,27 @@ func (r *SwarmAgentReconciler) buildDeployment(swarmAgent *kubeswarmv1alpha1.Swa
 						// Resource limits — use spec.resources if set, otherwise inject safe defaults.
 						// Ephemeral storage limit is always added to prevent /tmp exhaustion.
 						Resources: agentResources(swarmAgent),
-						Env:       r.buildEnvVars(swarmAgent, assembledPrompt, allSettings, swarmMemory, apiKeyEnvVar, resolvedMCPServers),
+						Env:       r.buildEnvVars(swarmAgent, allSettings, swarmMemory, apiKeyEnvVar, resolvedMCPServers),
 						// Global fallback secret (set via Helm apiKeys.existingSecret).
 						// Per-agent spec.envFrom entries are appended after and take precedence.
-						EnvFrom: append([]corev1.EnvFromSource{{
-							SecretRef: &corev1.SecretEnvSource{
-								LocalObjectReference: corev1.LocalObjectReference{
-									Name: agentAPIKeysSecret,
+						EnvFrom: func() []corev1.EnvFromSource {
+							// User-provided envFrom entries come first so they
+							// take precedence over the global secret (in K8s,
+							// the first EnvFrom source wins for duplicate keys).
+							var base []corev1.EnvFromSource
+							if swarmAgent.Spec.Infrastructure != nil {
+								base = append(base, swarmAgent.Spec.Infrastructure.EnvFrom...)
+							}
+							base = append(base, corev1.EnvFromSource{
+								SecretRef: &corev1.SecretEnvSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: agentAPIKeysSecret,
+									},
+									Optional: new(true),
 								},
-								Optional: new(true),
-							},
-						}}, swarmAgent.Spec.EnvFrom...),
+							})
+							return base
+						}(),
 						// mTLS Secret volumes for MCP servers (RFC-0016 Phase 5).
 						// Artifact PVC mount (RFC-0013) appended when configured.
 						VolumeMounts: buildVolumeMounts(swarmAgent, resolvedMCPServers),
@@ -1029,9 +1106,21 @@ func buildMCPVolumeMounts(servers []kubeswarmv1alpha1.MCPToolSpec) []corev1.Volu
 
 const artifactVolumeName = "swarm-artifacts"
 
-// buildVolumes returns all pod volumes: MCP mTLS secrets + optional artifact PVC (RFC-0013).
+// buildVolumes returns all pod volumes: prompt ConfigMap + MCP mTLS secrets + optional artifact PVC (RFC-0013).
 func buildVolumes(swarmAgent *kubeswarmv1alpha1.SwarmAgent, servers []kubeswarmv1alpha1.MCPToolSpec) []corev1.Volume {
-	vols := buildMCPVolumes(servers)
+	vols := []corev1.Volume{
+		{
+			Name: promptVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: swarmAgent.Name + "-prompt",
+					},
+				},
+			},
+		},
+	}
+	vols = append(vols, buildMCPVolumes(servers)...)
 	if claim, ok := swarmAgent.Annotations[annotationTeamArtifactClaim]; ok && claim != "" {
 		vols = append(vols, corev1.Volume{
 			Name: artifactVolumeName,
@@ -1045,9 +1134,16 @@ func buildVolumes(swarmAgent *kubeswarmv1alpha1.SwarmAgent, servers []kubeswarmv
 	return vols
 }
 
-// buildVolumeMounts returns all container mounts: MCP mTLS secrets + optional artifact PVC.
+// buildVolumeMounts returns all container mounts: prompt ConfigMap + MCP mTLS secrets + optional artifact PVC.
 func buildVolumeMounts(swarmAgent *kubeswarmv1alpha1.SwarmAgent, servers []kubeswarmv1alpha1.MCPToolSpec) []corev1.VolumeMount {
-	mounts := buildMCPVolumeMounts(servers)
+	mounts := []corev1.VolumeMount{
+		{
+			Name:      promptVolumeName,
+			MountPath: promptMountPath,
+			ReadOnly:  true,
+		},
+	}
+	mounts = append(mounts, buildMCPVolumeMounts(servers)...)
 	if claim, ok := swarmAgent.Annotations[annotationTeamArtifactClaim]; ok && claim != "" {
 		mountPath := swarmAgent.Annotations[annotationTeamArtifactStore]
 		// Extract the path from the file:// URL (strip scheme).
@@ -1067,7 +1163,6 @@ func buildVolumeMounts(swarmAgent *kubeswarmv1alpha1.SwarmAgent, servers []kubes
 
 func (r *SwarmAgentReconciler) buildEnvVars(
 	swarmAgent *kubeswarmv1alpha1.SwarmAgent,
-	assembledPrompt string,
 	allSettings []kubeswarmv1alpha1.SwarmSettings,
 	swarmMemory *kubeswarmv1alpha1.SwarmMemory,
 	apiKeyEnvVar *corev1.EnvVar,
@@ -1095,7 +1190,7 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 
 	envVars := []corev1.EnvVar{
 		{Name: "AGENT_MODEL", Value: swarmAgent.Spec.Model},
-		{Name: "AGENT_SYSTEM_PROMPT", Value: assembledPrompt},
+		{Name: "AGENT_SYSTEM_PROMPT_PATH", Value: promptFilePath},
 		{Name: "AGENT_MCP_SERVERS", Value: string(mcpJSON)},
 		{Name: "AGENT_MAX_TOKENS", Value: fmt.Sprintf("%d", maxTokens)},
 		{Name: "AGENT_TIMEOUT_SECONDS", Value: fmt.Sprintf("%d", timeoutSecs)},
@@ -1161,7 +1256,7 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 	envVars = append(envVars, buildPluginEnvVars(swarmAgent)...)
 
 	// Inject LoopPolicy as JSON (RFC-0026). Only set when the field is non-nil.
-	if swarmAgent.Spec.Runtime != nil && swarmAgent.Spec.Runtime.Loop != nil {
+	if swarmAgent.Spec.Runtime.Loop != nil {
 		if raw, err := json.Marshal(swarmAgent.Spec.Runtime.Loop); err == nil {
 			envVars = append(envVars, corev1.EnvVar{
 				Name:  "AGENT_LOOP_POLICY",
@@ -1221,15 +1316,16 @@ func buildArtifactEnvVars(swarmAgent *kubeswarmv1alpha1.SwarmAgent) []corev1.Env
 
 // buildPluginEnvVars returns env vars for external gRPC plugin addresses (RFC-0025).
 func buildPluginEnvVars(swarmAgent *kubeswarmv1alpha1.SwarmAgent) []corev1.EnvVar {
-	if swarmAgent.Spec.Plugins == nil {
+	if swarmAgent.Spec.Infrastructure == nil || swarmAgent.Spec.Infrastructure.Plugins == nil {
 		return nil
 	}
+	plugins := swarmAgent.Spec.Infrastructure.Plugins
 	var out []corev1.EnvVar
-	if swarmAgent.Spec.Plugins.LLM != nil {
-		out = append(out, corev1.EnvVar{Name: "SWARM_PLUGIN_LLM_ADDR", Value: swarmAgent.Spec.Plugins.LLM.Address})
+	if plugins.LLM != nil {
+		out = append(out, corev1.EnvVar{Name: "SWARM_PLUGIN_LLM_ADDR", Value: plugins.LLM.Address})
 	}
-	if swarmAgent.Spec.Plugins.Queue != nil {
-		out = append(out, corev1.EnvVar{Name: "SWARM_PLUGIN_QUEUE_ADDR", Value: swarmAgent.Spec.Plugins.Queue.Address})
+	if plugins.Queue != nil {
+		out = append(out, corev1.EnvVar{Name: "SWARM_PLUGIN_QUEUE_ADDR", Value: plugins.Queue.Address})
 	}
 	return out
 }
@@ -1269,16 +1365,16 @@ func (r *SwarmAgentReconciler) ensureDefaultRegistry(ctx context.Context, namesp
 // Emits a RegistryNotFound condition when the registry is absent. Non-blocking —
 // the agent starts regardless. Agents with registryRef == nil have opted out; no check.
 func (r *SwarmAgentReconciler) reconcileRegistryRef(ctx context.Context, agent *kubeswarmv1alpha1.SwarmAgent) {
-	if agent.Spec.RegistryRef == nil {
+	if agent.Spec.Infrastructure == nil || agent.Spec.Infrastructure.RegistryRef == nil {
 		apimeta.RemoveStatusCondition(&agent.Status.Conditions, "RegistryNotFound")
 		return
 	}
 	reg := &kubeswarmv1alpha1.SwarmRegistry{}
-	err := r.Get(ctx, client.ObjectKey{Name: agent.Spec.RegistryRef.Name, Namespace: agent.Namespace}, reg)
+	err := r.Get(ctx, client.ObjectKey{Name: agent.Spec.Infrastructure.RegistryRef.Name, Namespace: agent.Namespace}, reg)
 	if errors.IsNotFound(err) {
 		r.setCondition(agent, "RegistryNotFound", metav1.ConditionTrue, "RegistryNotFound",
 			fmt.Sprintf("SwarmRegistry %q not found in namespace %q; agent will not be indexed",
-				agent.Spec.RegistryRef.Name, agent.Namespace))
+				agent.Spec.Infrastructure.RegistryRef.Name, agent.Namespace))
 		return
 	}
 	apimeta.RemoveStatusCondition(&agent.Status.Conditions, "RegistryNotFound")
@@ -1401,19 +1497,20 @@ func (r *SwarmAgentReconciler) reconcileDailyBudget(
 	return 0, nil
 }
 
-// mcpHealthClient is used exclusively for MCP server health probes.
+// mcpHealthDialTimeout is used for TCP-based MCP server health probes.
 // 5s is enough to distinguish "server is up" from "server is unreachable".
-var mcpHealthClient = &http.Client{Timeout: 5 * time.Second}
+const mcpHealthDialTimeout = 5 * time.Second
 
 const mcpHealthRequeueInterval = 60 * time.Second
 
-// reconcileMCPHealth probes each configured MCP server with a lightweight HTTP GET
-// and writes the results to status.mcpServers[]. Sets an MCPDegraded Warning condition
+// reconcileMCPHealth probes each configured MCP server with a lightweight TCP dial
+// and writes the results to status.toolConnections[]. Sets an MCPDegraded Warning condition
 // when one or more servers are unreachable. Returns a requeue duration so the check
 // repeats on a regular interval regardless of other reconcile triggers.
 //
-// Any HTTP response with status < 500 is considered healthy — this correctly handles
-// MCP servers that require authentication (they return 401, not a connection error).
+// A TCP dial is auth-neutral - it verifies that the server is reachable without
+// needing credentials. HTTP-based checks gave misleading results because
+// authenticated servers return 401/403 which was treated as healthy.
 //
 // Probe failures are non-blocking: they update status but do not prevent the rest of
 // the reconcile loop from completing.
@@ -1424,10 +1521,11 @@ func (r *SwarmAgentReconciler) reconcileMCPHealth(
 ) (time.Duration, error) {
 	if len(resolvedMCPServers) == 0 {
 		apimeta.RemoveStatusCondition(&agent.Status.Conditions, "MCPDegraded")
-		agent.Status.MCPServers = nil
+		agent.Status.ToolConnections = nil
 		return 0, nil
 	}
 
+	boolPtr := func(v bool) *bool { return &v }
 	now := metav1.Now()
 	statuses := make([]kubeswarmv1alpha1.SwarmAgentMCPStatus, 0, len(resolvedMCPServers))
 	allHealthy := true
@@ -1439,38 +1537,40 @@ func (r *SwarmAgentReconciler) reconcileMCPHealth(
 			LastCheck: &now,
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+		u, err := neturl.Parse(server.URL)
 		if err != nil {
-			s.Healthy = false
+			s.Healthy = boolPtr(false)
 			s.Message = fmt.Sprintf("invalid URL: %v", err)
 			allHealthy = false
 		} else {
-			resp, err := mcpHealthClient.Do(req)
+			host := u.Host
+			if !strings.Contains(host, ":") {
+				if u.Scheme == "https" {
+					host += ":443"
+				} else {
+					host += ":80"
+				}
+			}
+			conn, err := net.DialTimeout("tcp", host, mcpHealthDialTimeout)
 			if err != nil {
-				s.Healthy = false
+				s.Healthy = boolPtr(false)
 				s.Message = err.Error()
 				allHealthy = false
 			} else {
-				_ = resp.Body.Close()
-				if resp.StatusCode < 500 {
-					s.Healthy = true
-				} else {
-					s.Healthy = false
-					s.Message = fmt.Sprintf("HTTP %d", resp.StatusCode)
-					allHealthy = false
-				}
+				_ = conn.Close()
+				s.Healthy = boolPtr(true)
 			}
 		}
 		statuses = append(statuses, s)
 	}
 
-	agent.Status.MCPServers = statuses
+	agent.Status.ToolConnections = statuses
 
 	if allHealthy {
 		apimeta.RemoveStatusCondition(&agent.Status.Conditions, "MCPDegraded")
 	} else {
 		r.setCondition(agent, "MCPDegraded", metav1.ConditionTrue, "MCPUnreachable",
-			"one or more MCP servers are unreachable; see status.mcpServers for details")
+			"one or more MCP servers are unreachable; see status.toolConnections for details")
 	}
 
 	// Status is updated by syncStatus which runs before this call; call Update here
@@ -1763,10 +1863,10 @@ func (r *SwarmAgentReconciler) resolveAPIKeyEnvVar(
 	ctx context.Context,
 	swarmAgent *kubeswarmv1alpha1.SwarmAgent,
 ) (*corev1.EnvVar, string, error) {
-	ref := swarmAgent.Spec.APIKeyRef
-	if ref == nil {
+	if swarmAgent.Spec.Infrastructure == nil || swarmAgent.Spec.Infrastructure.APIKeyRef == nil {
 		return nil, "", nil
 	}
+	ref := swarmAgent.Spec.Infrastructure.APIKeyRef
 
 	// Fetch the Secret to get its ResourceVersion for rolling-restart detection.
 	secret := &corev1.Secret{}

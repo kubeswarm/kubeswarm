@@ -80,7 +80,7 @@ func (r *SwarmRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Agents with registryRef == registry.Name (or defaulted to "default") are included.
 	registered := make([]kubeswarmv1alpha1.SwarmAgent, 0, len(agentList.Items))
 	for _, a := range agentList.Items {
-		if a.Spec.RegistryRef != nil && a.Spec.RegistryRef.Name == reg.Name {
+		if a.Spec.Infrastructure != nil && a.Spec.Infrastructure.RegistryRef != nil && a.Spec.Infrastructure.RegistryRef.Name == reg.Name {
 			registered = append(registered, a)
 		}
 	}

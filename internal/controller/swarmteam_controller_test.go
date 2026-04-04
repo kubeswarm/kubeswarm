@@ -82,7 +82,7 @@ var _ = Describe("SwarmTeam Controller", func() {
 			Spec: kubeswarmv1alpha1.SwarmAgentSpec{
 				Model:  "claude-haiku-4-5",
 				Prompt: &kubeswarmv1alpha1.AgentPrompt{Inline: "You are helpful."},
-				Runtime: &kubeswarmv1alpha1.AgentRuntime{
+				Runtime: kubeswarmv1alpha1.AgentRuntime{
 					Replicas: &replicas,
 				},
 			},
@@ -374,7 +374,7 @@ var _ = Describe("SwarmTeam Controller", func() {
 			return &kubeswarmv1alpha1.SwarmTeam{
 				ObjectMeta: metav1.ObjectMeta{Name: teamName, Namespace: namespace},
 				Spec: kubeswarmv1alpha1.SwarmTeamSpec{
-					Roles:    []kubeswarmv1alpha1.SwarmTeamRole{{Name: "worker", Model: "claude-haiku-4-5", SystemPrompt: "You are helpful."}},
+					Roles:    []kubeswarmv1alpha1.SwarmTeamRole{{Name: "worker", Model: "claude-haiku-4-5", Prompt: &kubeswarmv1alpha1.AgentPrompt{Inline: "You are helpful."}}},
 					Pipeline: []kubeswarmv1alpha1.SwarmTeamPipelineStep{{Role: "worker"}},
 				},
 			}
