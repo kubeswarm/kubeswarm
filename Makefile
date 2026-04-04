@@ -55,16 +55,8 @@ coverage: test ## Run tests and open HTML coverage report.
 .PHONY: helm-sync
 helm-sync: manifests ## Sync CRDs into the Helm chart and verify RBAC alignment.
 	cp config/crd/bases/*.yaml $(HELM_CHART)/crds/
-	@missing=$$( \
-	  grep '^\s*- swarm' config/rbac/role.yaml | sed 's|/.*||;s|.*- ||' | sort -u | while read res; do \
-	    grep -q "$$res" $(HELM_CHART)/templates/clusterrole.yaml || echo "  $$res"; \
-	  done); \
-	if [ -n "$$missing" ]; then \
-	  echo "WARNING: helm-sync: resources missing from Helm ClusterRole:"; \
-	  echo "$$missing"; \
-	else \
-	  echo "helm-sync: CRDs and RBAC in sync."; \
-	fi
+	@echo "helm-sync: CRDs synced ($$(ls config/crd/bases/*.yaml | wc -l | tr -d ' ') files)."
+	@bash scripts/rbac-check.sh config/rbac/role.yaml $(HELM_CHART)/templates/clusterrole.yaml
 
 ##@ Docs
 
@@ -121,6 +113,12 @@ local-up: helm-sync ## Build images, load into Kind, install/upgrade via Helm.
 	$(CONTAINER_TOOL) save redis:7-alpine | \
 		$(CONTAINER_TOOL) exec -i $(KIND_CLUSTER)-control-plane \
 		ctr --namespace=k8s.io images import --snapshotter=overlayfs -
+	helm repo add kedacore https://kedacore.github.io/charts 2>/dev/null || true
+	helm repo update kedacore
+	helm upgrade --install keda kedacore/keda \
+		--namespace keda --create-namespace \
+		--kube-context kind-$(KIND_CLUSTER) \
+		--wait
 	helm upgrade --install kubeswarm $(HELM_CHART) \
 		-f $(LOCAL_VALUES) \
 		--namespace $(LOCAL_NS) --create-namespace \
