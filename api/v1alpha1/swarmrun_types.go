@@ -127,8 +127,8 @@ type SwarmRunStatus struct {
 	TotalTokenUsage *TokenUsage `json:"totalTokenUsage,omitempty"`
 
 	// TotalCostUSD is the estimated total dollar cost of this run, summed across
-	// all steps using the operator's configured CostProvider.
-	TotalCostUSD float64 `json:"totalCostUSD,omitempty"`
+	// all steps using the operator's configured CostProvider. Decimal string.
+	TotalCostUSD string `json:"totalCostUSD,omitempty"`
 
 	// ObservedGeneration is the .metadata.generation this status reflects.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -145,7 +145,7 @@ type SwarmRunStatus struct {
 // +kubebuilder:printcolumn:name="Agent",type=string,JSONPath=`.spec.agent`,priority=0
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Tokens",type=integer,JSONPath=`.status.totalTokenUsage.totalTokens`
-// +kubebuilder:printcolumn:name="Cost($)",type=number,JSONPath=`.status.totalCostUSD`
+// +kubebuilder:printcolumn:name="Cost($)",type=string,JSONPath=`.status.totalCostUSD`
 // +kubebuilder:printcolumn:name="Started",type=date,JSONPath=`.status.startTime`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:resource:shortName={swrun,swruns},scope=Namespaced,categories=kubeswarm

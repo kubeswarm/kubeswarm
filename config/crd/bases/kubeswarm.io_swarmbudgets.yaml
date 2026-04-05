@@ -80,13 +80,11 @@ spec:
                   When true, new SwarmRuns fail immediately with BudgetExceeded before any tokens are spent.
                 type: boolean
               limit:
-                description: Limit is the maximum spend in the configured currency
-                  for one period.
-                minimum: 0
-                type: number
-                x-kubernetes-validations:
-                - message: limit must be non-negative
-                  rule: self >= 0
+                description: |-
+                  Limit is the maximum spend in the configured currency for one period.
+                  Value is a decimal string (e.g., "100.00").
+                pattern: ^[0-9]+(\.[0-9]+)?$
+                type: string
               notifyRef:
                 description: |-
                   NotifyRef references an SwarmNotify policy for budget alerts.
@@ -216,8 +214,8 @@ spec:
                 format: int64
                 type: integer
               pctUsed:
-                description: PctUsed is SpentUSD / Limit as a percentage (0–100).
-                type: number
+                description: PctUsed is SpentUSD / Limit as a percentage string (0-100).
+                type: string
               periodStart:
                 description: PeriodStart is the start of the current budget window.
                 format: date-time
@@ -235,9 +233,9 @@ spec:
                 description: Phase summarises the current budget state.
                 type: string
               spentUSD:
-                description: SpentUSD is the total spend in the current period window.
-                type: number
-                x-kubernetes-int-or-string: true
+                description: SpentUSD is the total spend in the current period window
+                  as a decimal string.
+                type: string
             type: object
         required:
         - spec

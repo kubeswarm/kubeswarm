@@ -60,9 +60,9 @@ type SwarmBudgetSpec struct {
 	Period string `json:"period,omitempty"`
 
 	// Limit is the maximum spend in the configured currency for one period.
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:XValidation:rule="self >= 0",message="limit must be non-negative"
-	Limit float64 `json:"limit"`
+	// Value is a decimal string (e.g., "100.00").
+	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?$`
+	Limit string `json:"limit"`
 
 	// Currency is the ISO 4217 currency code. Must match the operator's CostProvider.
 	// +kubebuilder:default=USD
@@ -96,12 +96,11 @@ type SwarmBudgetStatus struct {
 	// +kubebuilder:validation:Enum=OK;Warning;Exceeded
 	Phase BudgetStatus `json:"phase,omitempty"`
 
-	// SpentUSD is the total spend in the current period window.
-	// +kubebuilder:validation:XIntOrString
-	SpentUSD float64 `json:"spentUSD,omitempty"`
+	// SpentUSD is the total spend in the current period window as a decimal string.
+	SpentUSD string `json:"spentUSD,omitempty"`
 
-	// PctUsed is SpentUSD / Limit as a percentage (0–100).
-	PctUsed float64 `json:"pctUsed,omitempty"`
+	// PctUsed is SpentUSD / Limit as a percentage string (0-100).
+	PctUsed string `json:"pctUsed,omitempty"`
 
 	// PeriodStart is the start of the current budget window.
 	// +optional

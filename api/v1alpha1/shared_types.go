@@ -154,8 +154,8 @@ type SwarmFlowStepStatus struct {
 	// TokenUsage reports the tokens consumed by this step's LLM calls.
 	TokenUsage *TokenUsage `json:"tokenUsage,omitempty"`
 	// CostUSD is the estimated dollar cost of this step's LLM calls, calculated
-	// using the operator's configured CostProvider. Zero for unknown/local models.
-	CostUSD float64 `json:"costUSD,omitempty"`
+	// using the operator's configured CostProvider. Decimal string; empty for unknown/local models.
+	CostUSD string `json:"costUSD,omitempty"`
 	// ValidationAttempts counts how many times output validation has been run on this step.
 	// Incremented on each validation attempt; reset when the step is retried from Pending.
 	ValidationAttempts int `json:"validationAttempts,omitempty"`
