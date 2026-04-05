@@ -71,6 +71,24 @@ type LoopPolicyConfig struct {
 	Memory      *LoopMemoryConfig      `json:"memory,omitempty"`
 }
 
+// AuditLogConfig mirrors the CRD AuditLogConfig for structured audit logging (RFC-0030).
+// JSON tags match the audit.AuditConfig json tags so the operator can marshal directly.
+type AuditLogConfig struct {
+	// Mode controls the verbosity of audit logging (off, actions, verbose).
+	Mode string `json:"mode,omitempty"`
+	// Sink selects the output backend (stdout, redis, webhook).
+	Sink string `json:"sink,omitempty"`
+	// MaxDetailBytes is the maximum size for detail.input and detail.output
+	// fields before truncation. 0 means unlimited.
+	MaxDetailBytes int `json:"maxDetailBytes,omitempty"`
+	// Redact is a list of glob patterns for field path redaction.
+	Redact []string `json:"redact,omitempty"`
+	// ExcludeActions is a list of action types to skip.
+	ExcludeActions []string `json:"excludeActions,omitempty"`
+	// RedisURL is the Redis connection URL when sink=redis.
+	RedisURL string `json:"redisURL,omitempty"`
+}
+
 // MCPServerConfig holds the connection details for one MCP tool server.
 // Serialized into AGENT_MCP_SERVERS by the operator; read by the agent runtime at startup.
 // Secret values are never included — only env var names and file paths are carried here.
@@ -177,6 +195,10 @@ type Config struct {
 	// Injected by the operator as AGENT_LOOP_POLICY (JSON) from spec.runtime.loop.
 	// Nil when the field is unset on the SwarmAgent.
 	LoopPolicy *LoopPolicyConfig
+	// AuditLog configures the structured audit trail (RFC-0030).
+	// Injected by the operator as AGENT_AUDIT_LOG (JSON) from the resolved audit config.
+	// Nil when audit logging is disabled (mode=off or unset).
+	AuditLog *AuditLogConfig
 }
 
 // Load reads agent configuration from environment variables.
@@ -225,6 +247,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	cfg.LoopPolicy = lp
+
+	al, err := parseAuditLog()
+	if err != nil {
+		return nil, err
+	}
+	cfg.AuditLog = al
 
 	cfg.Namespace = os.Getenv("AGENT_NAMESPACE")
 	cfg.AgentName = os.Getenv("AGENT_NAME")
@@ -338,6 +366,21 @@ func parseLoopPolicy() (*LoopPolicyConfig, error) {
 		lp.Memory.EmbeddingProvider = os.Getenv("AGENT_EMBEDDING_PROVIDER")
 	}
 	return &lp, nil
+}
+
+func parseAuditLog() (*AuditLogConfig, error) {
+	raw := os.Getenv("AGENT_AUDIT_LOG")
+	if raw == "" {
+		return nil, nil
+	}
+	var al AuditLogConfig
+	if err := json.Unmarshal([]byte(raw), &al); err != nil {
+		return nil, fmt.Errorf("invalid AGENT_AUDIT_LOG JSON: %w", err)
+	}
+	if al.Mode == "" || al.Mode == "off" {
+		return nil, nil
+	}
+	return &al, nil
 }
 
 // loadSystemPrompt reads the system prompt from a file (AGENT_SYSTEM_PROMPT_PATH)

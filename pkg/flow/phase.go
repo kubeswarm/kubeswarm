@@ -18,6 +18,7 @@ package flow
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,7 +35,11 @@ func SumRunStepTokens(f *kubeswarmv1alpha1.SwarmRun) int64 {
 			totalIn += st.TokenUsage.InputTokens
 			totalOut += st.TokenUsage.OutputTokens
 		}
-		totalCost += st.CostUSD
+		if st.CostUSD != "" {
+			if v, err := strconv.ParseFloat(st.CostUSD, 64); err == nil {
+				totalCost += v
+			}
+		}
 	}
 	if totalIn > 0 || totalOut > 0 {
 		f.Status.TotalTokenUsage = &kubeswarmv1alpha1.TokenUsage{
@@ -43,7 +48,9 @@ func SumRunStepTokens(f *kubeswarmv1alpha1.SwarmRun) int64 {
 			TotalTokens:  totalIn + totalOut,
 		}
 	}
-	f.Status.TotalCostUSD = totalCost
+	if totalCost > 0 {
+		f.Status.TotalCostUSD = strconv.FormatFloat(totalCost, 'f', -1, 64)
+	}
 	return totalIn + totalOut
 }
 

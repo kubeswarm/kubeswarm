@@ -38,6 +38,7 @@ import (
 	"github.com/kubeswarm/kubeswarm/pkg/agent/mcp"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/providers"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/queue"
+	"github.com/kubeswarm/kubeswarm/pkg/audit"
 	"github.com/kubeswarm/kubeswarm/pkg/observability"
 )
 
@@ -73,6 +74,9 @@ type Runner struct {
 	metrics        *observability.AgentMetrics
 	metricAttrs    []attribute.KeyValue // namespace/agent/role label set
 	k8sEvents      *observability.AgentEventRecorder
+	auditEmitter   *audit.Emitter   // nil = audit disabled (RFC-0030)
+	auditRedactor  *audit.Redactor  // nil-safe, no-op when patterns empty
+	auditTruncator *audit.Truncator // nil-safe, no-op when maxBytes <= 0
 
 	// RFC-0026 deep-research hooks; all nil when loopPolicy is unset.
 	loopDedup bool // semantic dedup enabled for this runner
@@ -179,6 +183,14 @@ func (r *Runner) SetEventRecorder(rec *observability.AgentEventRecorder) {
 	r.k8sEvents = rec
 }
 
+// SetAuditEmitter wires in an audit emitter for structured audit logging (RFC-0030).
+// Called after New by the agent runtime; when nil, audit events are not emitted.
+func (r *Runner) SetAuditEmitter(e *audit.Emitter, redactor *audit.Redactor, truncator *audit.Truncator) {
+	r.auditEmitter = e
+	r.auditRedactor = redactor
+	r.auditTruncator = truncator
+}
+
 // AllTools returns the merged tool list for use by the health probe and tests.
 func (r *Runner) AllTools() []mcp.Tool {
 	return r.allTools
@@ -204,6 +216,7 @@ func (r *Runner) CallTool(ctx context.Context, toolName string, input json.RawMe
 
 	start := time.Now()
 	result, err := r.callToolInner(ctx, toolName, input)
+	durationMs := time.Since(start).Milliseconds()
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -219,6 +232,37 @@ func (r *Runner) CallTool(ctx context.Context, toolName string, input json.RawMe
 			r.metrics.RecordDelegate(ctx, r.metricAttrs...)
 		}
 	}
+
+	// Audit: tool.called (RFC-0030).
+	if r.auditEmitter != nil {
+		status := audit.StatusSuccess
+		if err != nil {
+			status = audit.StatusError
+		}
+		evt := audit.NewEvent(audit.ActionToolCalled, status, r.cfg.Namespace, r.cfg.AgentName)
+		evt.Team = r.cfg.TeamName
+		taskID, _ := ctx.Value(taskIDKey).(string)
+		evt.TaskID = taskID
+		evt.Model = r.cfg.Model
+		evt.Provider = r.cfg.Provider
+		detail := map[string]any{
+			"tool":       toolName,
+			"toolType":   toolType,
+			"durationMs": durationMs,
+		}
+		if len(input) > 0 {
+			detail["input"] = string(input)
+		}
+		if result != "" {
+			detail["output"] = result
+		}
+		r.applyAuditDetail(&evt, detail)
+		if err != nil {
+			evt.Error = &audit.AuditError{Message: err.Error()}
+		}
+		r.auditEmitter.Emit(evt)
+	}
+
 	return result, err
 }
 
@@ -288,6 +332,21 @@ func (r *Runner) callToolInner(ctx context.Context, toolName string, input json.
 			parentTaskID, _ := ctx.Value(taskIDKey).(string)
 			r.k8sEvents.TaskDelegated(parentTaskID, args.Role, taskID)
 		}
+		// Audit: delegate.sent (RFC-0030).
+		if r.auditEmitter != nil {
+			evt := audit.NewEvent(audit.ActionDelegateSent, audit.StatusSuccess, r.cfg.Namespace, r.cfg.AgentName)
+			evt.Team = r.cfg.TeamName
+			parentTaskID, _ := ctx.Value(taskIDKey).(string)
+			evt.TaskID = parentTaskID
+			detail := map[string]any{
+				"fromRole":    r.cfg.TeamRole,
+				"toRole":      args.Role,
+				"childTaskId": taskID,
+				"prompt":      args.Prompt,
+			}
+			r.applyAuditDetail(&evt, detail)
+			r.auditEmitter.Emit(evt)
+		}
 		return fmt.Sprintf("task delegated to role %q with id: %s", args.Role, taskID), nil
 	}
 
@@ -334,6 +393,17 @@ func (r *Runner) RunTask(ctx context.Context, task queue.Task) (string, queue.To
 	// remain connected across Redis queue boundaries.
 	ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(task.Meta))
 	ctx = context.WithValue(ctx, taskIDKey, task.ID)
+
+	// Audit: task.received (RFC-0030).
+	if r.auditEmitter != nil {
+		evt := audit.NewEvent(audit.ActionTaskReceived, audit.StatusSuccess, r.cfg.Namespace, r.cfg.AgentName)
+		evt.Team = r.cfg.TeamName
+		evt.TaskID = task.ID
+		evt.RunID = task.Meta["run_name"]
+		evt.Model = r.cfg.Model
+		evt.Provider = r.cfg.Provider
+		r.auditEmitter.Emit(evt)
+	}
 
 	ctx, span := observability.Tracer("swarm-runner").Start(ctx, "kubeswarm.task",
 		oteltrace.WithAttributes(
@@ -390,6 +460,38 @@ func (r *Runner) RunTask(ctx context.Context, task queue.Task) (string, queue.To
 			)...,
 		)
 	}
+
+	// Audit: task.completed / task.failed (RFC-0030).
+	if r.auditEmitter != nil {
+		taskDurationMs := time.Since(llmStart).Milliseconds()
+		if err != nil {
+			evt := audit.NewEvent(audit.ActionTaskFailed, audit.StatusError, r.cfg.Namespace, r.cfg.AgentName)
+			evt.Team = r.cfg.TeamName
+			evt.TaskID = task.ID
+			evt.RunID = task.Meta["run_name"]
+			evt.Model = r.cfg.Model
+			evt.Provider = r.cfg.Provider
+			evt.Error = &audit.AuditError{Message: err.Error()}
+			evt.Timing = &audit.Timing{ExecutionMs: taskDurationMs}
+			r.auditEmitter.Emit(evt)
+		} else {
+			evt := audit.NewEvent(audit.ActionTaskCompleted, audit.StatusSuccess, r.cfg.Namespace, r.cfg.AgentName)
+			evt.Team = r.cfg.TeamName
+			evt.TaskID = task.ID
+			evt.RunID = task.Meta["run_name"]
+			evt.Model = r.cfg.Model
+			evt.Provider = r.cfg.Provider
+			evt.Tokens = &audit.TokenUsage{Input: usage.InputTokens, Output: usage.OutputTokens}
+			evt.Timing = &audit.Timing{ExecutionMs: taskDurationMs}
+			detail := map[string]any{
+				"outputLength":    len(result),
+				"totalDurationMs": taskDurationMs,
+			}
+			r.applyAuditDetail(&evt, detail)
+			r.auditEmitter.Emit(evt)
+		}
+	}
+
 	return result, usage, err
 }
 
@@ -663,4 +765,23 @@ func callWebhook(ctx context.Context, wt config.WebhookToolConfig, input json.Ra
 	}
 	log.Printf("webhook tool %q: called successfully, status=%d", wt.Name, resp.StatusCode)
 	return string(body), nil
+}
+
+// applyAuditDetail applies redaction, truncation, and JSON marshalling to a detail
+// map and sets the result on the audit event. Called by all audit emission sites.
+func (r *Runner) applyAuditDetail(evt *audit.AuditEvent, detail map[string]any) {
+	if r.auditRedactor != nil {
+		detail = r.auditRedactor.Redact(detail)
+	}
+	if r.auditTruncator != nil {
+		truncated := false
+		detail, truncated = r.auditTruncator.Truncate(detail)
+		if truncated {
+			detail["truncated"] = true
+		}
+	}
+	data, err := json.Marshal(detail)
+	if err == nil {
+		evt.Detail = data
+	}
 }
