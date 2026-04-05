@@ -30,6 +30,8 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
+	goredis "github.com/redis/go-redis/v9"
+
 	"github.com/kubeswarm/kubeswarm/pkg/agent/budget"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/config"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/health"
@@ -39,7 +41,6 @@ import (
 	"github.com/kubeswarm/kubeswarm/pkg/agent/runner"
 	"github.com/kubeswarm/kubeswarm/pkg/artifacts"
 	"github.com/kubeswarm/kubeswarm/pkg/audit"
-	goredis "github.com/redis/go-redis/v9"
 	"github.com/kubeswarm/kubeswarm/pkg/costs"
 	"github.com/kubeswarm/kubeswarm/pkg/observability"
 
