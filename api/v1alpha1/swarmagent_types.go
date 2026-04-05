@@ -524,6 +524,16 @@ type AgentRuntime struct {
 	// compression, and vector memory read/write. All features are disabled by default.
 	// +optional
 	Loop *AgentLoopPolicy `json:"loop,omitempty"`
+
+	// DrainTimeoutSeconds is the time to wait for in-flight tasks to complete during
+	// pod shutdown (rolling update, scale-down). Maps to terminationGracePeriodSeconds
+	// on the generated pod spec. Should be >= guardrails.limits.timeoutSeconds.
+	// Default: 150 (2.5 minutes, giving a 120s task 30s of margin).
+	// +kubebuilder:default=150
+	// +kubebuilder:validation:Minimum=30
+	// +kubebuilder:validation:Maximum=600
+	// +optional
+	DrainTimeoutSeconds *int64 `json:"drainTimeoutSeconds,omitempty"`
 }
 
 // -----------------------------------------------------------------------------
@@ -703,7 +713,40 @@ type AgentMetrics struct {
 	Enabled bool `json:"enabled,omitempty"`
 }
 
-// AgentObservability groups health check, logging, and metrics configuration.
+// AuditLogMode controls the verbosity of audit event emission.
+// +kubebuilder:validation:Enum=off;actions;verbose
+type AuditLogMode string
+
+const (
+	// AuditLogModeOff disables audit logging (default).
+	AuditLogModeOff AuditLogMode = "off"
+	// AuditLogModeActions emits structured action events (tool calls, delegations, lifecycle, budget).
+	AuditLogModeActions AuditLogMode = "actions"
+	// AuditLogModeVerbose emits action events plus full LLM conversation turns (expensive).
+	AuditLogModeVerbose AuditLogMode = "verbose"
+)
+
+// AuditLogConfig configures the structured audit trail for agent actions.
+// See RFC-0030 for the full design.
+type AuditLogConfig struct {
+	// Mode controls the verbosity of audit logging.
+	// off: no audit events emitted (default).
+	// actions: emit structured action events.
+	// verbose: emit action events plus full LLM conversation turns.
+	// +kubebuilder:default=off
+	// +optional
+	Mode AuditLogMode `json:"mode,omitempty"`
+
+	// Redact is a list of glob patterns for field path redaction.
+	// Patterns use dot-separated paths matched via Go's path.Match,
+	// where * matches exactly one path segment.
+	// Example: "detail.input.*.apiKey"
+	// +kubebuilder:validation:MaxItems=20
+	// +optional
+	Redact []string `json:"redact,omitempty"`
+}
+
+// AgentObservability groups health check, logging, metrics, and audit configuration.
 type AgentObservability struct {
 	// HealthCheck defines how agent health is evaluated and how degraded agents are alerted.
 	// +optional
@@ -716,6 +759,11 @@ type AgentObservability struct {
 	// Metrics controls Prometheus metrics exposure.
 	// +optional
 	Metrics *AgentMetrics `json:"metrics,omitempty"`
+
+	// AuditLog configures the structured audit trail.
+	// When set, overrides namespace (SwarmSettings) and cluster (Helm) audit config.
+	// +optional
+	AuditLog *AuditLogConfig `json:"auditLog,omitempty"`
 }
 
 // -----------------------------------------------------------------------------
@@ -815,6 +863,9 @@ type SwarmAgentMCPStatus struct {
 	// +optional
 	LastCheck *metav1.Time `json:"lastCheck,omitempty"`
 }
+
+// ConditionQueueReady indicates the agent can connect to its task queue.
+const ConditionQueueReady = "QueueReady"
 
 // SwarmAgentStatus defines the observed state of SwarmAgent.
 type SwarmAgentStatus struct {

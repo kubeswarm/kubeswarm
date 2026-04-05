@@ -476,6 +476,34 @@ spec:
                 description: Observability groups health check, logging, and metrics
                   configuration.
                 properties:
+                  auditLog:
+                    description: |-
+                      AuditLog configures the structured audit trail.
+                      When set, overrides namespace (SwarmSettings) and cluster (Helm) audit config.
+                    properties:
+                      mode:
+                        default: "off"
+                        description: |-
+                          Mode controls the verbosity of audit logging.
+                          off: no audit events emitted (default).
+                          actions: emit structured action events.
+                          verbose: emit action events plus full LLM conversation turns.
+                        enum:
+                        - "off"
+                        - actions
+                        - verbose
+                        type: string
+                      redact:
+                        description: |-
+                          Redact is a list of glob patterns for field path redaction.
+                          Patterns use dot-separated paths matched via Go's path.Match,
+                          where * matches exactly one path segment.
+                          Example: "detail.input.*.apiKey"
+                        items:
+                          type: string
+                        maxItems: 20
+                        type: array
+                    type: object
                   healthCheck:
                     description: HealthCheck defines how agent health is evaluated
                       and how degraded agents are alerted.
@@ -669,6 +697,17 @@ spec:
                         minimum: 1
                         type: integer
                     type: object
+                  drainTimeoutSeconds:
+                    default: 150
+                    description: |-
+                      DrainTimeoutSeconds is the time to wait for in-flight tasks to complete during
+                      pod shutdown (rolling update, scale-down). Maps to terminationGracePeriodSeconds
+                      on the generated pod spec. Should be >= guardrails.limits.timeoutSeconds.
+                      Default: 150 (2.5 minutes, giving a 120s task 30s of margin).
+                    format: int64
+                    maximum: 600
+                    minimum: 30
+                    type: integer
                   loop:
                     description: |-
                       Loop configures deep-research runtime features: semantic dedup, in-loop context

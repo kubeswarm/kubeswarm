@@ -111,6 +111,19 @@ type SwarmSettingsSpec struct {
 	// The strictest policy across all referenced SwarmSettings wins.
 	// +optional
 	Security *SwarmSettingsSecurity `json:"security,omitempty"`
+
+	// Observability configures namespace-level observability settings.
+	// Overrides cluster-level (Helm) defaults; can be overridden per-agent.
+	// +optional
+	Observability *SettingsObservability `json:"observability,omitempty"`
+}
+
+// SettingsObservability holds namespace-level observability configuration.
+type SettingsObservability struct {
+	// AuditLog configures the structured audit trail at namespace level.
+	// Overrides cluster-level (Helm) audit config; can be overridden per-agent.
+	// +optional
+	AuditLog *AuditLogConfig `json:"auditLog,omitempty"`
 }
 
 // SwarmSettingsStatus defines the observed state of SwarmSettings.
