@@ -30,8 +30,17 @@ manifests: controller-gen kustomize ## Regenerate CRDs, RBAC and webhook manifes
 ##@ Quality
 
 .PHONY: lint-fix
-lint-fix: golangci-lint ## Run golangci-lint with auto-fix.
+lint-fix: golangci-lint check-unicode ## Run golangci-lint with auto-fix.
 	GOWORK=off "$(GOLANGCI_LINT)" run --fix
+
+.PHONY: check-unicode
+check-unicode: ## Reject Unicode smart quotes in api/ types (breaks kubebuilder CEL markers).
+	@# Detects: U+201C (left "), U+201D (right "), U+2018 (left '), U+2019 (right ')
+	@if LC_ALL=C grep -rn $$'\xe2\x80\x9c\|\xe2\x80\x9d\|\xe2\x80\x98\|\xe2\x80\x99' api/ 2>/dev/null; then \
+		echo "ERROR: Unicode smart quotes found in api/ types. These break CEL validation markers."; \
+		echo "       Replace with ASCII quotes or use size() for empty string checks in CEL rules."; \
+		exit 1; \
+	fi
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint (read-only).
