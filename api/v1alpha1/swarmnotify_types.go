@@ -80,6 +80,9 @@ type SlackChannelSpec struct {
 }
 
 // NotifyChannelSpec defines a single notification channel.
+//
+// +kubebuilder:validation:XValidation:rule="self.type == 'webhook' || !has(self.webhook)",message="webhook config can only be set when type is webhook"
+// +kubebuilder:validation:XValidation:rule="self.type == 'slack' || !has(self.slack)",message="slack config can only be set when type is slack"
 type NotifyChannelSpec struct {
 	// Type determines the channel implementation.
 	// +kubebuilder:validation:Enum=webhook;slack
@@ -136,9 +139,13 @@ type NotifyDispatchResult struct {
 
 // SwarmNotifyStatus defines the observed state of SwarmNotify.
 type SwarmNotifyStatus struct {
+	// ChannelCount is the number of configured notification channels.
+	ChannelCount int `json:"channelCount,omitempty"`
 	// LastDispatches records the most recent dispatch result per channel index.
 	// +optional
 	LastDispatches []NotifyDispatchResult `json:"lastDispatches,omitempty"`
+	// ObservedGeneration is the .metadata.generation this status reflects.
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// Conditions reflect the current state of the SwarmNotify.
 	// +listType=map
 	// +listMapKey=type
@@ -148,7 +155,7 @@ type SwarmNotifyStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Channels",type=integer,JSONPath=`.spec.channels`
+// +kubebuilder:printcolumn:name="Channels",type=integer,JSONPath=`.status.channelCount`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:resource:scope=Namespaced,shortName={swnfy,swnfys},categories=kubeswarm
 

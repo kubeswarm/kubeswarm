@@ -198,6 +198,11 @@ spec:
             required:
             - backend
             type: object
+            x-kubernetes-validations:
+            - message: redis config can only be set when backend is redis
+              rule: self.backend == 'redis' || !has(self.redis)
+            - message: vectorStore config can only be set when backend is vector-store
+              rule: self.backend == 'vector-store' || !has(self.vectorStore)
           status:
             description: SwarmMemoryStatus defines the observed state of SwarmMemory.
             properties:

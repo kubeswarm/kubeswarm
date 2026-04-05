@@ -34,6 +34,7 @@ const (
 )
 
 // SwarmTeamRole defines one role in the team.
+// +kubebuilder:validation:XValidation:rule="!(has(self.swarmAgent) && has(self.swarmTeam)) && !(has(self.swarmAgent) && has(self.model)) && !(has(self.swarmTeam) && has(self.model))",message="at most one of swarmAgent or swarmTeam or model (inline) may be set"
 type SwarmTeamRole struct {
 	// Name is the unique role identifier (e.g. "researcher", "coordinator").
 	// +kubebuilder:validation:Required
@@ -214,6 +215,9 @@ type ArtifactStoreGCSSpec struct {
 }
 
 // ArtifactStoreSpec configures where pipeline file artifacts are stored.
+// +kubebuilder:validation:XValidation:rule="self.type == 'local' || !has(self.local)",message="local config can only be set when type is local"
+// +kubebuilder:validation:XValidation:rule="self.type == 's3' || !has(self.s3)",message="s3 config can only be set when type is s3"
+// +kubebuilder:validation:XValidation:rule="self.type == 'gcs' || !has(self.gcs)",message="gcs config can only be set when type is gcs"
 type ArtifactStoreSpec struct {
 	// Type selects the storage backend.
 	// +kubebuilder:validation:Required
@@ -367,6 +371,14 @@ type SwarmTeamPipelineStep struct {
 	// into downstream step prompts. Defaults to strategy=full (verbatim, current behaviour).
 	// +optional
 	ContextPolicy *StepContextPolicy `json:"contextPolicy,omitempty"`
+
+	// MaxOutputBytes limits the size of stored step output. Default: 65536 (64KB).
+	// Outputs exceeding this limit are truncated with a "[truncated]" marker.
+	// Set to 0 for unlimited (not recommended - risks exceeding etcd object size limits).
+	// +kubebuilder:default=65536
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxOutputBytes int `json:"maxOutputBytes,omitempty"`
 }
 
 // SwarmTeamScaleToZero configures scale-to-zero behaviour for a team's inline agents.

@@ -20,7 +20,7 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.channels
+    - jsonPath: .status.channelCount
       name: Channels
       type: integer
     - jsonPath: .metadata.creationTimestamp
@@ -194,6 +194,11 @@ spec:
                   required:
                   - type
                   type: object
+                  x-kubernetes-validations:
+                  - message: webhook config can only be set when type is webhook
+                    rule: self.type == 'webhook' || !has(self.webhook)
+                  - message: slack config can only be set when type is slack
+                    rule: self.type == 'slack' || !has(self.slack)
                 minItems: 1
                 type: array
               "on":
@@ -225,6 +230,10 @@ spec:
           status:
             description: SwarmNotifyStatus defines the observed state of SwarmNotify.
             properties:
+              channelCount:
+                description: ChannelCount is the number of configured notification
+                  channels.
+                type: integer
               conditions:
                 description: Conditions reflect the current state of the SwarmNotify.
                 items:
@@ -325,6 +334,11 @@ spec:
                   - succeeded
                   type: object
                 type: array
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation this status
+                  reflects.
+                format: int64
+                type: integer
             type: object
         required:
         - spec

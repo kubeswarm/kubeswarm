@@ -96,6 +96,8 @@ type EmbeddingConfig struct {
 }
 
 // SwarmMemorySpec defines the desired memory configuration.
+// +kubebuilder:validation:XValidation:rule="self.backend == 'redis' || !has(self.redis)",message="redis config can only be set when backend is redis"
+// +kubebuilder:validation:XValidation:rule="self.backend == 'vector-store' || !has(self.vectorStore)",message="vectorStore config can only be set when backend is vector-store"
 type SwarmMemorySpec struct {
 	// Backend selects the memory storage strategy.
 	// +kubebuilder:validation:Required
