@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -40,6 +41,7 @@ import (
 	"github.com/kubeswarm/kubeswarm/internal/registry"
 	"github.com/kubeswarm/kubeswarm/internal/routing"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/queue"
+	"github.com/kubeswarm/kubeswarm/pkg/audit"
 	"github.com/kubeswarm/kubeswarm/pkg/costs"
 	"github.com/kubeswarm/kubeswarm/pkg/flow"
 	"github.com/kubeswarm/kubeswarm/pkg/observability"
@@ -82,6 +84,9 @@ type SwarmRunReconciler struct {
 	// Registry is the shared capability index maintained by SwarmRegistryController.
 	// When nil, registryLookup steps fail immediately.
 	Registry *registry.Registry
+	// AuditEmitter emits structured audit events (RFC-0030).
+	// When nil, audit logging is disabled.
+	AuditEmitter *audit.Emitter
 }
 
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmruns,verbs=get;list;watch;create;update;patch;delete
@@ -215,6 +220,14 @@ func (r *SwarmRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			r.Recorder.Event(run, corev1.EventTypeNormal, "RunStarted",
 				fmt.Sprintf("SwarmRun %q started for team %q", run.Name, run.Spec.TeamRef))
 		}
+		// Audit: run.triggered (RFC-0030).
+		if r.AuditEmitter != nil {
+			evt := audit.NewEvent(audit.ActionRunTriggered, audit.StatusSuccess, run.Namespace, "")
+			evt.RunID = run.Name
+			evt.Team = run.Spec.TeamRef
+			evt.Env = audit.Env{Service: "operator"}
+			r.AuditEmitter.Emit(evt)
+		}
 	}
 
 	// Enforce run-level timeout.
@@ -265,6 +278,24 @@ func (r *SwarmRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		case kubeswarmv1alpha1.SwarmRunPhaseFailed:
 			r.Recorder.Event(run, corev1.EventTypeWarning, "RunFailed",
 				fmt.Sprintf("SwarmRun %q failed for team %q", run.Name, run.Spec.TeamRef))
+		}
+	}
+
+	// Audit: run.succeeded / run.failed (RFC-0030).
+	if r.AuditEmitter != nil {
+		switch run.Status.Phase {
+		case kubeswarmv1alpha1.SwarmRunPhaseSucceeded:
+			evt := audit.NewEvent(audit.ActionRunSucceeded, audit.StatusSuccess, run.Namespace, "")
+			evt.RunID = run.Name
+			evt.Team = run.Spec.TeamRef
+			evt.Env = audit.Env{Service: "operator"}
+			r.AuditEmitter.Emit(evt)
+		case kubeswarmv1alpha1.SwarmRunPhaseFailed:
+			evt := audit.NewEvent(audit.ActionRunFailed, audit.StatusError, run.Namespace, "")
+			evt.RunID = run.Name
+			evt.Team = run.Spec.TeamRef
+			evt.Env = audit.Env{Service: "operator"}
+			r.AuditEmitter.Emit(evt)
 		}
 	}
 
@@ -486,7 +517,7 @@ func (r *SwarmRunReconciler) applyAgentResult(
 		model = agent.Spec.Model
 	}
 	if model != "" {
-		st.CostUSD = cp.Cost(model, res.Usage.InputTokens, res.Usage.OutputTokens)
+		st.CostUSD = fmt.Sprintf("%.6f", cp.Cost(model, res.Usage.InputTokens, res.Usage.OutputTokens))
 	}
 	r.recordStepSpend(ctx, run, st, model, res.Usage)
 }
@@ -656,6 +687,18 @@ func (r *SwarmRunReconciler) submitPendingSteps(
 		st.TaskID = taskID
 		st.StartTime = &now
 		logger.Info("submitted task", "step", step.Role, "taskID", taskID)
+
+		// Audit: run.step.started (RFC-0030).
+		if r.AuditEmitter != nil {
+			evt := audit.NewEvent(audit.ActionRunStepStarted, audit.StatusSuccess, run.Namespace, agentName)
+			evt.RunID = run.Name
+			evt.Team = run.Spec.TeamRef
+			evt.TaskID = taskID
+			evt.Env = audit.Env{Service: "operator"}
+			detailData, _ := json.Marshal(map[string]any{"step": step.Role})
+			evt.Detail = detailData
+			r.AuditEmitter.Emit(evt)
+		}
 	}
 	return nil
 }
@@ -760,7 +803,7 @@ func (r *SwarmRunReconciler) collectResults(
 				}
 				model := r.resolveStepModel(ctx, run, st.Name)
 				if model != "" {
-					st.CostUSD = cp.Cost(model, res.Usage.InputTokens, res.Usage.OutputTokens)
+					st.CostUSD = fmt.Sprintf("%.6f", cp.Cost(model, res.Usage.InputTokens, res.Usage.OutputTokens))
 				}
 				// Always record spend so token counts reach the budget dashboard even when
 				// the model cannot be resolved (CostUSD will be 0 but tokens are preserved).
@@ -777,6 +820,24 @@ func (r *SwarmRunReconciler) collectResults(
 
 			st.Phase = kubeswarmv1alpha1.SwarmFlowStepPhaseSucceeded
 			st.CompletionTime = &now
+
+			// Audit: run.step.completed (RFC-0030).
+			if r.AuditEmitter != nil {
+				evt := audit.NewEvent(audit.ActionRunStepCompleted, audit.StatusSuccess, run.Namespace, "")
+				evt.RunID = run.Name
+				evt.Team = run.Spec.TeamRef
+				evt.TaskID = res.TaskID
+				evt.Env = audit.Env{Service: "operator"}
+				if st.TokenUsage != nil {
+					evt.Tokens = &audit.TokenUsage{
+						Input:  st.TokenUsage.InputTokens,
+						Output: st.TokenUsage.OutputTokens,
+					}
+				}
+				detailData, _ := json.Marshal(map[string]any{"step": st.Name})
+				evt.Detail = detailData
+				r.AuditEmitter.Emit(evt)
+			}
 		}
 	}
 	return nil
@@ -1131,11 +1192,16 @@ func (r *SwarmRunReconciler) checkBudgets(ctx context.Context, run *kubeswarmv1a
 		if !b.Spec.HardStop {
 			continue
 		}
+		limitFloat, err := strconv.ParseFloat(b.Spec.Limit, 64)
+		if err != nil {
+			log.FromContext(ctx).Error(err, "parsing budget limit", "budget", b.Name, "limit", b.Spec.Limit)
+			continue
+		}
 		input := costs.BudgetInput{
 			Namespace: run.Namespace,
 			Team:      run.Spec.TeamRef,
 			Period:    b.Spec.Period,
-			Limit:     b.Spec.Limit,
+			Limit:     limitFloat,
 			WarnAt:    b.Spec.WarnAt,
 		}
 		decision, err := policy.Evaluate(ctx, input, r.SpendStore)
@@ -1387,9 +1453,10 @@ func (r *SwarmRunReconciler) recordStepSpend(
 	if r.SpendStore == nil {
 		return
 	}
-	if st.CostUSD == 0 && usage.InputTokens == 0 && usage.OutputTokens == 0 {
+	if (st.CostUSD == "" || st.CostUSD == "0") && usage.InputTokens == 0 && usage.OutputTokens == 0 {
 		return
 	}
+	costFloat, _ := strconv.ParseFloat(st.CostUSD, 64)
 	entry := costs.SpendEntry{
 		Timestamp:    time.Now(),
 		Namespace:    run.Namespace,
@@ -1399,7 +1466,7 @@ func (r *SwarmRunReconciler) recordStepSpend(
 		Model:        model,
 		InputTokens:  usage.InputTokens,
 		OutputTokens: usage.OutputTokens,
-		CostUSD:      st.CostUSD,
+		CostUSD:      costFloat,
 	}
 	if err := r.SpendStore.Record(ctx, entry); err != nil {
 		log.FromContext(ctx).Error(err, "recording spend entry", "run", run.Name, "step", st.Name)

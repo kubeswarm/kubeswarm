@@ -26,6 +26,7 @@ import (
 	neturl "net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1265,6 +1266,16 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 		}
 	}
 
+	// Inject audit log config as JSON (RFC-0030).
+	// Reads cluster-level defaults from operator env vars (set by Helm),
+	// then overrides with agent-level spec.observability.auditLog if set.
+	if auditJSON := buildAuditLogEnvVar(swarmAgent); auditJSON != "" {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "AGENT_AUDIT_LOG",
+			Value: auditJSON,
+		})
+	}
+
 	// Deduplicate: last occurrence wins. This prevents warnings when
 	// SWARM_AGENT_INJECT_TASK_QUEUE_URL and the team annotation both set TASK_QUEUE_URL.
 	seen := make(map[string]int, len(envVars))
@@ -1400,7 +1411,7 @@ func (r *SwarmAgentReconciler) reconcileBudgetRef(ctx context.Context, agent *ku
 	}
 	if budget.Spec.HardStop && budget.Status.Phase == kubeswarmv1alpha1.BudgetStatusExceeded {
 		r.setCondition(agent, "BudgetExceeded", metav1.ConditionTrue, "BudgetRefExceeded",
-			fmt.Sprintf("SwarmBudget %q is exceeded (%.2f/%.2f %s); replicas scaled to 0",
+			fmt.Sprintf("SwarmBudget %q is exceeded (%s/%s %s); replicas scaled to 0",
 				budget.Name, budget.Status.SpentUSD, budget.Spec.Limit, budget.Spec.Currency))
 	}
 	return nil
@@ -1990,6 +2001,70 @@ func agentInjectEnvVars() []corev1.EnvVar {
 		})
 	}
 	return vars
+}
+
+// buildAuditLogEnvVar builds the AGENT_AUDIT_LOG JSON value from the operator's
+// own audit config (set by Helm via AUDIT_LOG_* env vars) merged with any
+// agent-level spec.observability.auditLog override.
+func buildAuditLogEnvVar(agent *kubeswarmv1alpha1.SwarmAgent) string {
+	// Read cluster-level defaults from operator env vars (set by Helm).
+	mode := os.Getenv("AUDIT_LOG_MODE")
+	if mode == "" || mode == "off" {
+		// Check if agent-level override enables audit.
+		if agent.Spec.Observability != nil &&
+			agent.Spec.Observability.AuditLog != nil &&
+			agent.Spec.Observability.AuditLog.Mode != "" &&
+			agent.Spec.Observability.AuditLog.Mode != kubeswarmv1alpha1.AuditLogModeOff {
+			mode = string(agent.Spec.Observability.AuditLog.Mode)
+		} else {
+			return ""
+		}
+	}
+
+	// Agent-level mode overrides cluster-level.
+	if agent.Spec.Observability != nil &&
+		agent.Spec.Observability.AuditLog != nil &&
+		agent.Spec.Observability.AuditLog.Mode != "" {
+		mode = string(agent.Spec.Observability.AuditLog.Mode)
+		if mode == "off" {
+			return ""
+		}
+	}
+
+	cfg := map[string]any{
+		"mode": mode,
+		"sink": os.Getenv("AUDIT_LOG_SINK"),
+	}
+	if cfg["sink"] == "" {
+		cfg["sink"] = "stdout"
+	}
+	if v := os.Getenv("AUDIT_LOG_MAX_DETAIL_BYTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg["maxDetailBytes"] = n
+		}
+	}
+	if v := os.Getenv("AUDIT_LOG_REDIS_URL"); v != "" {
+		cfg["redisURL"] = v
+	}
+
+	// Merge redaction patterns: cluster + agent level.
+	var redact []string
+	if v := os.Getenv("AUDIT_LOG_REDACT"); v != "" {
+		_ = json.Unmarshal([]byte(v), &redact)
+	}
+	if agent.Spec.Observability != nil &&
+		agent.Spec.Observability.AuditLog != nil {
+		redact = append(redact, agent.Spec.Observability.AuditLog.Redact...)
+	}
+	if len(redact) > 0 {
+		cfg["redact"] = redact
+	}
+
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
 }
 
 // agentImagePullPolicy returns the configured pull policy, defaulting to Always.

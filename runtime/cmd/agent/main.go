@@ -38,6 +38,8 @@ import (
 	"github.com/kubeswarm/kubeswarm/pkg/agent/queue"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/runner"
 	"github.com/kubeswarm/kubeswarm/pkg/artifacts"
+	"github.com/kubeswarm/kubeswarm/pkg/audit"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/kubeswarm/kubeswarm/pkg/costs"
 	"github.com/kubeswarm/kubeswarm/pkg/observability"
 
@@ -173,6 +175,42 @@ func main() {
 
 	r := runner.New(cfg, mcpManager, provider, taskQueue, stream, delegateQueues)
 	r.SetEventRecorder(k8sEvents)
+
+	// Wire audit emitter (RFC-0030). Reads from cfg.AuditLog which is parsed
+	// from the AGENT_AUDIT_LOG env var injected by the operator.
+	if cfg.AuditLog != nil {
+		var auditSink audit.AuditSink
+		switch cfg.AuditLog.Sink {
+		case "redis":
+			if cfg.AuditLog.RedisURL != "" {
+				opts, err := goredis.ParseURL(cfg.AuditLog.RedisURL)
+				if err != nil {
+					logger.Error("failed to parse audit redis URL", "error", err)
+					os.Exit(1)
+				}
+				rdb := goredis.NewClient(opts)
+				auditSink = audit.NewRedisSink(&goredisAdapter{rdb})
+			} else {
+				logger.Warn("audit sink=redis but no redisURL configured, falling back to stdout")
+				auditSink = audit.NewStdoutSink(nil)
+			}
+		case "stdout", "":
+			auditSink = audit.NewStdoutSink(nil)
+		default:
+			auditSink = audit.NewStdoutSink(nil)
+		}
+		emitter := audit.NewEmitter(auditSink, 0)
+		emitter.SetMode(audit.AuditLogMode(cfg.AuditLog.Mode))
+		redactor := audit.NewRedactor(cfg.AuditLog.Redact)
+		truncator := audit.NewTruncator(cfg.AuditLog.MaxDetailBytes)
+		r.SetAuditEmitter(emitter, redactor, truncator)
+		logger.Info("audit emitter enabled for agent", "mode", cfg.AuditLog.Mode, "sink", cfg.AuditLog.Sink)
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+			emitter.Close(shutdownCtx)
+		}()
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -388,4 +426,18 @@ func collectArtifacts(ctx context.Context, cfg *config.Config, task queue.Task) 
 		return nil
 	}
 	return result
+}
+
+// goredisAdapter wraps a go-redis client to implement the audit.RedisClient interface.
+type goredisAdapter struct {
+	rdb *goredis.Client
+}
+
+func (a *goredisAdapter) XAdd(ctx context.Context, stream string, maxLen int64, values map[string]any) error {
+	return a.rdb.XAdd(ctx, &goredis.XAddArgs{
+		Stream: stream,
+		MaxLen: maxLen,
+		Approx: true,
+		Values: values,
+	}).Err()
 }

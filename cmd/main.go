@@ -51,6 +51,7 @@ import (
 	"github.com/kubeswarm/kubeswarm/internal/registry"
 	swarmbhook "github.com/kubeswarm/kubeswarm/internal/webhook"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/queue"
+	"github.com/kubeswarm/kubeswarm/pkg/audit"
 	"github.com/kubeswarm/kubeswarm/pkg/costs"
 	"github.com/kubeswarm/kubeswarm/pkg/observability"
 	"github.com/kubeswarm/kubeswarm/pkg/validation"
@@ -355,6 +356,23 @@ func Run() {
 		}
 	}
 
+	// Build operator-side audit emitter (RFC-0030). Reads AUDIT_LOG_MODE and
+	// AUDIT_LOG_SINK from Helm values (env vars injected by the Helm chart).
+	// The emitter is shared across all controllers; nil when mode is "off" or unset.
+	var operatorAuditEmitter *audit.Emitter
+	if auditMode := os.Getenv("AUDIT_LOG_MODE"); auditMode != "" && auditMode != "off" {
+		var sink audit.AuditSink
+		switch os.Getenv("AUDIT_LOG_SINK") {
+		case "stdout", "":
+			sink = audit.NewStdoutSink(nil)
+		default:
+			sink = audit.NewStdoutSink(nil)
+		}
+		operatorAuditEmitter = audit.NewEmitter(sink, 0)
+		operatorAuditEmitter.SetMode(audit.AuditLogMode(auditMode))
+		setupLog.Info("Audit emitter enabled for operator", "mode", auditMode)
+	}
+
 	notifyDispatcher := controller.NewNotifyDispatcher(mgr.GetClient())
 
 	// Shared capability registry - maintained by SwarmRegistryReconciler, read by SwarmRunReconciler.
@@ -385,6 +403,7 @@ func Run() {
 		SpendStore:         spendStore,
 		BudgetPolicy:       costs.DefaultBudgetPolicy(),
 		Registry:           capRegistry,
+		AuditEmitter:       operatorAuditEmitter,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "SwarmRun")
 		os.Exit(1)
@@ -404,6 +423,7 @@ func Run() {
 		SpendStore:       spendStore,
 		BudgetPolicy:     costs.DefaultBudgetPolicy(),
 		NotifyDispatcher: notifyDispatcher,
+		AuditEmitter:     operatorAuditEmitter,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "SwarmBudget")
 		os.Exit(1)

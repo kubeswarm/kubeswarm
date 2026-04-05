@@ -18,7 +18,9 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -30,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	kubeswarmv1alpha1 "github.com/kubeswarm/kubeswarm/api/v1alpha1"
+	"github.com/kubeswarm/kubeswarm/pkg/audit"
 	"github.com/kubeswarm/kubeswarm/pkg/costs"
 )
 
@@ -44,6 +47,9 @@ type SwarmBudgetReconciler struct {
 	SpendStore       costs.SpendStore
 	BudgetPolicy     costs.BudgetPolicy
 	NotifyDispatcher *NotifyDispatcher
+	// AuditEmitter emits structured audit events (RFC-0030).
+	// When nil, audit logging is disabled.
+	AuditEmitter *audit.Emitter
 }
 
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmbudgets,verbs=get;list;watch;create;update;patch;delete
@@ -74,11 +80,16 @@ func (r *SwarmBudgetReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		ns = budget.Namespace
 	}
 
+	limitFloat, err := strconv.ParseFloat(budget.Spec.Limit, 64)
+	if err != nil {
+		logger.Error(err, "parsing budget limit", "budget", req.Name, "limit", budget.Spec.Limit)
+		return ctrl.Result{RequeueAfter: budgetRequeueAfter}, nil
+	}
 	input := costs.BudgetInput{
 		Namespace: ns,
 		Team:      budget.Spec.Selector.Team,
 		Period:    budget.Spec.Period,
-		Limit:     budget.Spec.Limit,
+		Limit:     limitFloat,
 		WarnAt:    budget.Spec.WarnAt,
 	}
 
@@ -88,13 +99,33 @@ func (r *SwarmBudgetReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: budgetRequeueAfter}, nil
 	}
 
+	// Audit: budget.checked / budget.exceeded (RFC-0030).
+	if r.AuditEmitter != nil {
+		action := audit.ActionBudgetChecked
+		status := audit.StatusSuccess
+		if decision.Status == costs.BudgetExceeded {
+			action = audit.ActionBudgetExceeded
+			status = audit.StatusDenied
+		}
+		evt := audit.NewEvent(action, status, budget.Namespace, "")
+		evt.Env = audit.Env{Service: "operator"}
+		detailData, _ := json.Marshal(map[string]any{
+			"budget":   budget.Name,
+			"spentUSD": decision.SpentUSD,
+			"pctUsed":  decision.PctUsed,
+			"message":  decision.Message,
+		})
+		evt.Detail = detailData
+		r.AuditEmitter.Emit(evt)
+	}
+
 	// Update status.
 	now := metav1.Now()
 	prevPhase := budget.Status.Phase
 
 	budget.Status.Phase = kubeswarmv1alpha1.BudgetStatus(decision.Status)
-	budget.Status.SpentUSD = decision.SpentUSD
-	budget.Status.PctUsed = decision.PctUsed
+	budget.Status.SpentUSD = fmt.Sprintf("%.6f", decision.SpentUSD)
+	budget.Status.PctUsed = fmt.Sprintf("%.6f", decision.PctUsed)
 	budget.Status.LastUpdated = &now
 	budget.Status.ObservedGeneration = budget.Generation
 
