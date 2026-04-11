@@ -103,9 +103,9 @@ helm-sync: manifests ## Sync CRDs into the Helm chart and verify RBAC alignment.
 .PHONY: build
 build: generate ## Compile controller and runtime binaries.
 	@echo "Building controller..."
-	@CGO_ENABLED=0 go build -o bin/kubeswarm-controller ./runtime/cmd/operator/
+	@CGO_ENABLED=0 go build -o bin/kubeswarm-controller ./runtime/cmd/kubeswarm-controller/
 	@echo "Building runtime..."
-	@CGO_ENABLED=0 go build -o bin/kubeswarm-runtime ./runtime/cmd/agent/
+	@CGO_ENABLED=0 go build -o bin/kubeswarm-runtime ./runtime/cmd/kubeswarm-runtime/
 
 IMG         ?= ghcr.io/kubeswarm/kubeswarm-controller:latest
 RUNTIME_REL ?= ghcr.io/kubeswarm/kubeswarm-runtime:latest
@@ -303,9 +303,9 @@ kind-delete: ## Delete the Kind cluster.
 .PHONY: local-up
 local-up: kind-create generate manifests ## Build, load, and deploy to local Kind cluster.
 	@echo "Building controller..."
-	@CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -o bin/kubeswarm-controller ./runtime/cmd/operator/
+	@CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -o bin/kubeswarm-controller ./runtime/cmd/kubeswarm-controller/
 	@echo "Building runtime..."
-	@CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -o bin/kubeswarm-runtime ./runtime/cmd/agent/
+	@CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -o bin/kubeswarm-runtime ./runtime/cmd/kubeswarm-runtime/
 	@echo "Building images..."
 	@docker build -q -t $(CONTROLLER_IMG) -f Dockerfile.local bin/
 	@docker build -q -t $(RUNTIME_IMG) -f Dockerfile.runtime.local bin/
@@ -321,9 +321,9 @@ local-up: kind-create generate manifests ## Build, load, and deploy to local Kin
 .PHONY: local-up-helm
 local-up-helm: kind-create generate manifests helm-sync ## Build, load, and deploy via Helm.
 	@echo "Building controller..."
-	@CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -o bin/kubeswarm-controller ./runtime/cmd/operator/
+	@CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -o bin/kubeswarm-controller ./runtime/cmd/kubeswarm-controller/
 	@echo "Building runtime..."
-	@CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -o bin/kubeswarm-runtime ./runtime/cmd/agent/
+	@CGO_ENABLED=0 GOOS=linux GOARCH=$$(go env GOARCH) go build -o bin/kubeswarm-runtime ./runtime/cmd/kubeswarm-runtime/
 	@echo "Building images..."
 	@docker build -q -t $(CONTROLLER_IMG) -f Dockerfile.local bin/
 	@docker build -q -t $(RUNTIME_IMG) -f Dockerfile.runtime.local bin/

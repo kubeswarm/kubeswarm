@@ -117,11 +117,12 @@ kubeswarm/
   internal/mcpgateway/   MCP SSE gateway for agent-to-agent calls
   pkg/                   Shared packages (audit, costs, healthz, observability)
   runtime/               Nested Go module - agent binary + vendor SDK implementations
-    cmd/agent/           Agent runtime entrypoint
-    cmd/operator/        Operator binary entrypoint
-    providers/           LLM provider implementations (Anthropic, OpenAI, Gemini)
+    cmd/kubeswarm-runtime/      Agent runtime entrypoint
+    cmd/kubeswarm-controller/   Controller binary entrypoint
+    pkg/providers/       LLM provider implementations (Anthropic, OpenAI, Gemini)
+    pkg/queue/           Task queue backends (Redis)
     pkg/vectors/         Vector store backends (pgvector, Qdrant)
-    pkg/artifacts/       Artifact store backends (S3, GCS, local)
+    pkg/artifacts/       Artifact store backends (S3, GCS)
 ```
 
 The core `kubeswarm/` module has zero vendor SDK imports. All LLM, queue, and storage
