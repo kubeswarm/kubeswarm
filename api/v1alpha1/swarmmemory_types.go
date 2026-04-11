@@ -22,13 +22,12 @@ import (
 )
 
 // VectorStoreProvider names a supported vector database.
-// +kubebuilder:validation:Enum=qdrant;pinecone;weaviate
+// +kubebuilder:validation:Enum=qdrant;pgvector
 type VectorStoreProvider string
 
 const (
 	VectorStoreProviderQdrant   VectorStoreProvider = "qdrant"
-	VectorStoreProviderPinecone VectorStoreProvider = "pinecone"
-	VectorStoreProviderWeaviate VectorStoreProvider = "weaviate"
+	VectorStoreProviderPgvector VectorStoreProvider = "pgvector"
 )
 
 // RedisMemoryConfig configures the Redis memory backend.
@@ -69,15 +68,14 @@ type VectorStoreMemoryConfig struct {
 // and spec.vectorStore is set.
 type EmbeddingConfig struct {
 	// Model is the embedding model ID.
-	// Supported: text-embedding-3-small, text-embedding-3-large (OpenAI),
-	// text-embedding-004 (Google), voyage-3-lite (Voyage AI).
+	// Supported: text-embedding-3-small, text-embedding-3-large (OpenAI).
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Model string `json:"model"`
 
 	// Provider selects the embedding provider.
 	// When "auto" (default), the provider is inferred from the model name.
-	// +kubebuilder:validation:Enum=auto;openai;google;voyageai
+	// +kubebuilder:validation:Enum=auto;openai
 	// +kubebuilder:default=auto
 	// +optional
 	Provider string `json:"provider,omitempty"`

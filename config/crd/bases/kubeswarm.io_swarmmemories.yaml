@@ -103,8 +103,7 @@ spec:
                   model:
                     description: |-
                       Model is the embedding model ID.
-                      Supported: text-embedding-3-small, text-embedding-3-large (OpenAI),
-                      text-embedding-004 (Google), voyage-3-lite (Voyage AI).
+                      Supported: text-embedding-3-small, text-embedding-3-large (OpenAI).
                     minLength: 1
                     type: string
                   provider:
@@ -115,8 +114,6 @@ spec:
                     enum:
                     - auto
                     - openai
-                    - google
-                    - voyageai
                     type: string
                 required:
                 - model
@@ -169,8 +166,7 @@ spec:
                     description: Provider is the vector database to use.
                     enum:
                     - qdrant
-                    - pinecone
-                    - weaviate
+                    - pgvector
                     type: string
                   secretRef:
                     description: SecretRef optionally names a Secret whose VECTOR_STORE_API_KEY

@@ -84,8 +84,7 @@ func RegisterVectorStore(scheme string, factory Factory) {
 // Example URLs:
 //
 //	qdrant://qdrant.svc:6334/agent-memories
-//	pinecone://index.svc.pinecone.io?apiKey=...
-//	weaviate://weaviate.svc:8080/AgentMemory
+//	postgres://pgvector.svc:5432/vectors?table=agent_memories
 func NewVectorStore(url string) (VectorStore, error) {
 	scheme := schemeOf(url)
 	mu.RLock()
