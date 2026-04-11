@@ -23,14 +23,14 @@ package main
 
 import (
 	// Register built-in queue backend and spend store (Redis).
-	_ "github.com/kubeswarm/kubeswarm/runtime/costs/redisstore"
-	_ "github.com/kubeswarm/kubeswarm/runtime/queue/redis"
+	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/costs/redisstore"
+	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/queue/redis"
 
 	// Register LLM providers so the operator can perform semantic validation,
 	// output routing, and step compression via the providers.New() registry.
-	_ "github.com/kubeswarm/kubeswarm/runtime/providers/anthropic"
-	_ "github.com/kubeswarm/kubeswarm/runtime/providers/gemini"
-	_ "github.com/kubeswarm/kubeswarm/runtime/providers/openai"
+	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/providers/anthropic"
+	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/providers/gemini"
+	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/providers/openai"
 
 	// Operator Run() lives in the controller module so controller/webhook/CRD
 	// code stays in one place. This file only wires in the plugin implementations.

@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package cmd contains the kubeswarm operator Run function. The binary entrypoint
-// lives in runtime/cmd/operator/main.go, which registers all third-party
+// Package cmd contains the kubeswarm controller Run function. The binary entrypoint
+// lives in runtime/cmd/kubeswarm-controller/main.go, which registers all third-party
 // plugin implementations before calling Run().
 package cmd
 
@@ -171,8 +171,8 @@ func (p *boolProbe) Check(_ context.Context) error {
 	return nil
 }
 
-// Run starts the kubeswarm operator. It is called from the binary entrypoint in
-// runtime/cmd/operator/main.go after all plugin init() functions have run.
+// Run starts the kubeswarm controller. It is called from the binary entrypoint in
+// runtime/cmd/kubeswarm-controller/main.go after all plugin init() functions have run.
 func Run() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string

@@ -38,6 +38,8 @@ dist/
 /kubeswarm-controller
 /kubeswarm-runtime
 /main
+/agent
+/operator
 
 # Local environment / secrets
 .env

@@ -11,7 +11,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -C runtime -a -trimpath \
     -ldflags "-s -w -X github.com/kubeswarm/kubeswarm/cmd.version=${VERSION}" \
-    -o /kubeswarm-controller ./cmd/operator/
+    -o /kubeswarm-controller ./cmd/kubeswarm-controller/
 
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /

@@ -10,7 +10,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -C runtime -a -trimpath -ldflags="-s -w" \
     -o /kubeswarm-runtime \
-    ./cmd/agent/
+    ./cmd/kubeswarm-runtime/
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=builder /kubeswarm-runtime /kubeswarm-runtime

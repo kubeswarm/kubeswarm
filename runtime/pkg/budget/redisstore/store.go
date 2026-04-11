@@ -17,7 +17,7 @@ limitations under the License.
 // Package redisstore registers a Redis-backed budget Store.
 // Import with a blank import to activate it:
 //
-//	import _ "github.com/kubeswarm/kubeswarm/runtime/agent/budget/redisstore"
+//	import _ "github.com/kubeswarm/kubeswarm/runtime/pkg/budget/redisstore"
 package redisstore
 
 import (

@@ -46,14 +46,14 @@ import (
 
 	// Register built-in LLM providers and queue backends. These keep SDK deps
 	// out of the controller module. Activated by their init() functions.
-	_ "github.com/kubeswarm/kubeswarm/runtime/agent/budget/redisstore"
-	_ "github.com/kubeswarm/kubeswarm/runtime/costs/redisstore"
 	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/artifacts/gcs"
 	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/artifacts/s3"
-	_ "github.com/kubeswarm/kubeswarm/runtime/providers/anthropic"
-	_ "github.com/kubeswarm/kubeswarm/runtime/providers/gemini"
-	_ "github.com/kubeswarm/kubeswarm/runtime/providers/openai"
-	_ "github.com/kubeswarm/kubeswarm/runtime/queue/redis"
+	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/budget/redisstore"
+	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/costs/redisstore"
+	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/providers/anthropic"
+	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/providers/gemini"
+	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/providers/openai"
+	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/queue/redis"
 
 	// Register gRPC adapter providers/queues (RFC-0025). Always compiled in;
 	// activate only when SWARM_PLUGIN_LLM_ADDR / SWARM_PLUGIN_QUEUE_ADDR are set.
@@ -81,17 +81,55 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Connect to MCP servers and discover tools.
-	// Failures are non-fatal: the agent runs with whatever tools were successfully discovered.
+	mcpManager := initMCP(logger, cfg)
+	defer mcpManager.Close()
+
+	provider := initProvider(logger, cfg)
+	taskQueue, stream, delegateQueues := initQueues(logger, cfg)
+	defer closeQueues(taskQueue, delegateQueues)
+
+	budgetStore := initBudgetStore(logger, cfg)
+	defer func() {
+		if err := budgetStore.Close(); err != nil {
+			logger.Warn("failed to close budget store", "error", err)
+		}
+	}()
+
+	spendStore := initSpendStore(logger, cfg)
+	metrics, k8sEvents := initObservability(logger, cfg)
+
+	r := runner.New(cfg, mcpManager, provider, taskQueue, stream, delegateQueues)
+	r.SetEventRecorder(k8sEvents)
+
+	auditCleanup := initAudit(logger, cfg, r)
+	if auditCleanup != nil {
+		defer auditCleanup()
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+
+	logger.Info("agent runtime started",
+		"model", cfg.Model,
+		"provider", cfg.Provider,
+		"mcp_servers", len(cfg.MCPServers),
+	)
+
+	go health.ServeProbe(":8080", r, cfg.ValidatorPrompt)
+
+	pollLoop(ctx, logger, cfg, r, taskQueue, stream, budgetStore, spendStore, metrics, k8sEvents)
+}
+
+func initMCP(logger *slog.Logger, cfg *config.Config) *mcp.Manager {
 	mcpManager, err := mcp.NewManager(cfg.MCPServers)
 	if err != nil {
 		logger.Warn("one or more MCP servers unavailable, continuing with reduced toolset", "error", err)
 		mcpManager, _ = mcp.NewManager(nil)
 	}
-	defer mcpManager.Close()
+	return mcpManager
+}
 
-	// Select LLM provider: external gRPC plugin takes precedence over built-in (RFC-0025).
-	// Auto-detect from model name when AGENT_PROVIDER is not explicitly set.
+func initProvider(logger *slog.Logger, cfg *config.Config) providers.LLMProvider {
 	providerName := cfg.Provider
 	if providerName == "" {
 		providerName = providers.Detect(cfg.Model)
@@ -106,8 +144,12 @@ func main() {
 		logger.Error("unsupported LLM provider", "provider", providerName, "error", err)
 		os.Exit(1)
 	}
+	return provider
+}
 
-	// Select task queue: external gRPC plugin takes precedence over TASK_QUEUE_URL (RFC-0025).
+func initQueues(
+	logger *slog.Logger, cfg *config.Config,
+) (queue.TaskQueue, queue.StreamChannel, map[string]queue.TaskQueue) {
 	queueURL := cfg.TaskQueueURL
 	if cfg.ExternalQueueAddr != "" {
 		queueURL = "grpc://" + cfg.ExternalQueueAddr
@@ -125,29 +167,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	budgetStore, err := budget.NewStore(cfg.TaskQueueURL, cfg.DailyTokenLimit, cfg.Namespace, cfg.AgentName)
-	if err != nil {
-		logger.Error("failed to create budget store", "error", err)
-		os.Exit(1)
-	}
-	defer func() {
-		if err := budgetStore.Close(); err != nil {
-			logger.Warn("failed to close budget store", "error", err)
-		}
-	}()
-
-	spendStoreURL := os.Getenv("SPEND_STORE_URL")
-	if spendStoreURL == "" {
-		// Strip kubeswarm-specific ?stream= param - standard Redis URL parsers reject it.
-		spendStoreURL, _, _ = strings.Cut(cfg.TaskQueueURL, "?")
-	}
-	spendStore, err := costs.NewSpendStore(spendStoreURL)
-	if err != nil {
-		logger.Warn("failed to create spend store, spend will not be recorded", "error", err)
-		spendStore = costs.NoopSpendStore{}
-	}
-
-	// Build delegate queue connections for each team route.
 	var delegateQueues map[string]queue.TaskQueue
 	if len(cfg.TeamRoutes) > 0 {
 		delegateQueues = make(map[string]queue.TaskQueue, len(cfg.TeamRoutes))
@@ -161,75 +180,106 @@ func main() {
 		}
 	}
 
-	defer func() {
-		taskQueue.Close()
-		for _, dq := range delegateQueues {
-			dq.Close()
-		}
-	}()
+	return taskQueue, stream, delegateQueues
+}
 
+func closeQueues(taskQueue queue.TaskQueue, delegateQueues map[string]queue.TaskQueue) {
+	taskQueue.Close()
+	for _, dq := range delegateQueues {
+		dq.Close()
+	}
+}
+
+func initBudgetStore(logger *slog.Logger, cfg *config.Config) budget.Store {
+	budgetStore, err := budget.NewStore(cfg.TaskQueueURL, cfg.DailyTokenLimit, cfg.Namespace, cfg.AgentName)
+	if err != nil {
+		logger.Error("failed to create budget store", "error", err)
+		os.Exit(1)
+	}
+	return budgetStore
+}
+
+func initSpendStore(logger *slog.Logger, cfg *config.Config) costs.SpendStore {
+	spendStoreURL := os.Getenv("SPEND_STORE_URL")
+	if spendStoreURL == "" {
+		spendStoreURL, _, _ = strings.Cut(cfg.TaskQueueURL, "?")
+	}
+	spendStore, err := costs.NewSpendStore(spendStoreURL)
+	if err != nil {
+		logger.Warn("failed to create spend store, spend will not be recorded", "error", err)
+		return costs.NoopSpendStore{}
+	}
+	return spendStore
+}
+
+func initObservability(
+	logger *slog.Logger, cfg *config.Config,
+) (*observability.AgentMetrics, *observability.AgentEventRecorder) {
 	metrics, err := observability.NewAgentMetrics()
 	if err != nil {
 		logger.Warn("failed to create agent metrics, continuing without metrics", "error", err)
 		metrics = nil
 	}
-
 	k8sEvents := observability.NewAgentEventRecorder(cfg.Namespace, cfg.AgentName)
+	return metrics, k8sEvents
+}
 
-	r := runner.New(cfg, mcpManager, provider, taskQueue, stream, delegateQueues)
-	r.SetEventRecorder(k8sEvents)
-
-	// Wire audit emitter (RFC-0030). Reads from cfg.AuditLog which is parsed
-	// from the AGENT_AUDIT_LOG env var injected by the operator.
-	if cfg.AuditLog != nil {
-		var auditSink audit.AuditSink
-		switch cfg.AuditLog.Sink {
-		case "redis":
-			if cfg.AuditLog.RedisURL != "" {
-				opts, err := goredis.ParseURL(cfg.AuditLog.RedisURL)
-				if err != nil {
-					logger.Error("failed to parse audit redis URL", "error", err)
-					os.Exit(1)
-				}
-				rdb := goredis.NewClient(opts)
-				sinkOpts := audit.RedisSinkOptions{}
-				if cfg.AuditLog.MaxStreamLen > 0 {
-					sinkOpts.MaxLen = cfg.AuditLog.MaxStreamLen
-				}
-				auditSink = audit.NewRedisSinkWithOptions(&goredisAdapter{rdb}, sinkOpts)
-			} else {
-				logger.Warn("audit sink=redis but no redisURL configured, falling back to stdout")
-				auditSink = audit.NewStdoutSink(nil)
-			}
-		case "stdout", "":
-			auditSink = audit.NewStdoutSink(nil)
-		default:
-			auditSink = audit.NewStdoutSink(nil)
-		}
-		emitter := audit.NewEmitter(auditSink, 0)
-		emitter.SetMode(audit.AuditLogMode(cfg.AuditLog.Mode))
-		redactor := audit.NewRedactor(cfg.AuditLog.Redact)
-		truncator := audit.NewTruncator(cfg.AuditLog.MaxDetailBytes)
-		r.SetAuditEmitter(emitter, redactor, truncator)
-		logger.Info("audit emitter enabled for agent", "mode", cfg.AuditLog.Mode, "sink", cfg.AuditLog.Sink)
-		defer func() {
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer shutdownCancel()
-			emitter.Close(shutdownCtx)
-		}()
+func initAudit(logger *slog.Logger, cfg *config.Config, r *runner.Runner) func() {
+	if cfg.AuditLog == nil {
+		return nil
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer cancel()
+	var auditSink audit.AuditSink
+	switch cfg.AuditLog.Sink {
+	case "redis":
+		if cfg.AuditLog.RedisURL != "" {
+			opts, err := goredis.ParseURL(cfg.AuditLog.RedisURL)
+			if err != nil {
+				logger.Error("failed to parse audit redis URL", "error", err)
+				os.Exit(1)
+			}
+			rdb := goredis.NewClient(opts)
+			sinkOpts := audit.RedisSinkOptions{}
+			if cfg.AuditLog.MaxStreamLen > 0 {
+				sinkOpts.MaxLen = cfg.AuditLog.MaxStreamLen
+			}
+			auditSink = audit.NewRedisSinkWithOptions(&goredisAdapter{rdb}, sinkOpts)
+		} else {
+			logger.Warn("audit sink=redis but no redisURL configured, falling back to stdout")
+			auditSink = audit.NewStdoutSink(nil)
+		}
+	case "stdout", "":
+		auditSink = audit.NewStdoutSink(nil)
+	default:
+		auditSink = audit.NewStdoutSink(nil)
+	}
 
-	logger.Info("agent runtime started",
-		"model", cfg.Model,
-		"provider", cfg.Provider,
-		"mcp_servers", len(cfg.MCPServers),
-	)
+	emitter := audit.NewEmitter(auditSink, 0)
+	emitter.SetMode(audit.AuditLogMode(cfg.AuditLog.Mode))
+	redactor := audit.NewRedactor(cfg.AuditLog.Redact)
+	truncator := audit.NewTruncator(cfg.AuditLog.MaxDetailBytes)
+	r.SetAuditEmitter(emitter, redactor, truncator)
+	logger.Info("audit emitter enabled for agent", "mode", cfg.AuditLog.Mode, "sink", cfg.AuditLog.Sink)
 
-	go health.ServeProbe(":8080", r, cfg.ValidatorPrompt)
+	return func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		emitter.Close(shutdownCtx)
+	}
+}
 
+func pollLoop(
+	ctx context.Context,
+	logger *slog.Logger,
+	cfg *config.Config,
+	r *runner.Runner,
+	taskQueue queue.TaskQueue,
+	stream queue.StreamChannel,
+	budgetStore budget.Store,
+	spendStore costs.SpendStore,
+	metrics *observability.AgentMetrics,
+	k8sEvents *observability.AgentEventRecorder,
+) {
 	sem := make(chan struct{}, cfg.MaxConcurrentTasks)
 
 	for {

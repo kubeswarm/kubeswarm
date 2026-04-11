@@ -17,7 +17,7 @@ limitations under the License.
 // Package redisstore registers a Redis-backed SpendStore.
 // Import with a blank import to activate it:
 //
-//	import _ "github.com/kubeswarm/kubeswarm/pkg/costs/redisstore"
+//	import _ "github.com/kubeswarm/kubeswarm/runtime/pkg/costs/redisstore"
 package redisstore
 
 import (
