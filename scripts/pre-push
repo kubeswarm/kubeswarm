@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Skip CI for tag pushes.
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if echo "$remote_ref" | grep -q '^refs/tags/'; then
+    exit 0
+  fi
+done
+
+echo "Running make ci before push..."
+make ci

@@ -1,0 +1,75 @@
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmAgent
+metadata:
+  name: research-agent
+  namespace: default
+spec:
+  replicas: 2
+  model: llama3.2
+  # Option 1 (short prompts): inline
+  systemPrompt: |
+    You are a research agent. Your job is to gather, analyse and summarise
+    information accurately and concisely. Always cite your sources. When you
+    are unsure, say so rather than guessing.
+
+  # Option 2 (long prompts / external files): reference a ConfigMap or Secret.
+  # The operator reads the content at reconcile time and restarts pods automatically
+  # when the file changes. Create the ConfigMap with:
+  #   kubectl create configmap research-agent-prompt \
+  #     --from-file=system.txt=./prompts/research-agent.md
+  #
+  # systemPromptRef:
+  #   configMapKeyRef:
+  #     name: research-agent-prompt
+  #     key: system.txt
+  #
+  # Or from a Secret (for prompts with sensitive instructions):
+  #   secretKeyRef:
+  #     name: research-agent-prompt-secret
+  #     key: system.txt
+  # Capabilities declare what this agent can do for the SwarmRegistry (RFC-0001).
+  # Other teams can route steps to this agent by capability ID + optional tags.
+  capabilities:
+    - id: research.web
+      description: Research a topic using web sources
+      tags: [web, general]
+
+  limits:
+    maxTokensPerCall: 8000
+    maxConcurrentTasks: 5
+    timeoutSeconds: 120
+    # maxDailyTokens: 500000  # Uncomment to cap 24h spend. Replicas scale to 0 when reached.
+  livenessProbe:
+    type: semantic
+    intervalSeconds: 60
+    validatorPrompt: "Reply with exactly one word: HEALTHY"
+  # Inline HTTP webhook tools - no MCP server required.
+  # The agent runtime calls these URLs directly when the LLM invokes the tool.
+  tools:
+    - name: fetch_news
+      description: "Fetch the latest news headlines for a given topic from the internal news API."
+      url: "http://news-api.internal/headlines"
+      method: POST
+      inputSchema: |
+        {
+          "type": "object",
+          "properties": {
+            "topic": { "type": "string", "description": "The topic to search for" },
+            "limit": { "type": "integer", "default": 10 }
+          },
+          "required": ["topic"]
+        }
+    - name: store_finding
+      description: "Persist a research finding to the shared findings store."
+      url: "http://findings-store.internal/findings"
+      method: POST
+      inputSchema: |
+        {
+          "type": "object",
+          "properties": {
+            "title": { "type": "string" },
+            "content": { "type": "string" },
+            "tags": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["title", "content"]
+        }

@@ -1,0 +1,30 @@
+# Standalone Redis for local development only.
+# Not part of the Helm chart - the chart requires users to bring their own queue backend.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: redis
+  namespace: kubeswarm-system
+  labels:
+    app: redis
+spec:
+  containers:
+    - name: redis
+      image: redis:7-alpine
+      ports:
+        - containerPort: 6379
+      resources:
+        limits:
+          memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: kubeswarm-system
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379

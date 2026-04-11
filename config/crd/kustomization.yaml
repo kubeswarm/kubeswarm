@@ -1,0 +1,24 @@
+# This kustomization.yaml is not intended to be run by itself,
+# since it depends on service name and namespace that are out of this kustomize package.
+# It should be run by config/default
+resources:
+  - bases/kubeswarm.io_swarmagents.yaml
+  - bases/kubeswarm.io_swarmsettings.yaml
+  - bases/kubeswarm.io_swarmmemories.yaml
+  - bases/kubeswarm.io_swarmevents.yaml
+  - bases/kubeswarm.io_swarmteams.yaml
+  - bases/kubeswarm.io_swarmruns.yaml
+  - bases/kubeswarm.io_swarmbudgets.yaml
+  - bases/kubeswarm.io_swarmregistries.yaml
+  - bases/kubeswarm.io_swarmnotifies.yaml
+# +kubebuilder:scaffold:crdkustomizeresource
+
+patches:
+# [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix.
+# patches here are for enabling the conversion webhook for each CRD
+# +kubebuilder:scaffold:crdkustomizewebhookpatch
+
+# [WEBHOOK] To enable webhook, uncomment the following section
+# the following config is for teaching kustomize how to do kustomization for CRDs.
+#configurations:
+#- kustomizeconfig.yaml

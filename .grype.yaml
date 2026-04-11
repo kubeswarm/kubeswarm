@@ -1,0 +1,4 @@
+exclude:
+  - ./bin/**
+  - ./cover.out
+  - ./cover.html

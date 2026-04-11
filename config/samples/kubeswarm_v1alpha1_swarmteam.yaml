@@ -1,0 +1,133 @@
+## Example 1 - Pipeline mode (DAG execution)
+## Use this for: deterministic workflows where steps run in a defined order.
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmTeam
+metadata:
+  name: research-pipeline
+  namespace: default
+spec:
+  # Flow-level timeout: fail the pipeline if it hasn't finished in 10 minutes.
+  timeoutSeconds: 600
+  input:
+    topic: "AI in healthcare"
+    detailed: "true"
+
+  # Roles define the agent capabilities available to this team.
+  # Inline roles (model + systemPrompt) auto-create SwarmAgent CRs named "{team}-{role}".
+  roles:
+    - name: researcher
+      model: llama3.2
+      systemPrompt: |
+        You are a research specialist. Gather detailed information on the topic
+        provided and return structured findings.
+      limits:
+        maxTokensPerCall: 8000
+        timeoutSeconds: 120
+      mcpServers:
+        - name: web-search
+          url: https://search.mcp.example.com/sse
+
+    - name: summarizer
+      model: llama3.2:1b
+      systemPrompt: |
+        You are a summarization specialist. Condense the provided research
+        into a concise, well-structured report.
+      limits:
+        maxTokensPerCall: 4000
+        timeoutSeconds: 60
+
+  # Pipeline defines the DAG execution order.
+  pipeline:
+    # Step 1 - unconditional research step.
+    - role: researcher
+      inputs:
+        prompt: "Research the following topic thoroughly: {{ .input.topic }}"
+      outputSchema: |
+        {
+          "type": "object",
+          "properties": {
+            "summary": { "type": "string" },
+            "sources": { "type": "array", "items": { "type": "string" } },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+          },
+          "required": ["summary", "sources", "confidence"]
+        }
+
+    # Step 2 - conditional: only run detailed analysis when requested.
+    - role: summarizer
+      dependsOn:
+        - researcher
+      # Only runs when the caller requested a detailed report.
+      if: '{{ eq .input.detailed "true" }}'
+      inputs:
+        prompt: "Produce a final executive summary of these findings:\n\n{{ .steps.researcher.data.summary }}"
+
+  output: "{{ .steps.summarizer.output }}"
+---
+## Example 2 - Dynamic mode (delegation graph)
+## Use this for: open-ended tasks where the coordinator decides which roles to invoke.
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmTeam
+metadata:
+  name: research-team
+  namespace: default
+spec:
+  # entry names the role that receives the initial task and delegates to specialists.
+  entry: coordinator
+
+  roles:
+    # Entry role: receives external tasks and delegates work to specialists.
+    - name: coordinator
+      swarmAgent: coordinator-agent
+      canDelegate:
+        - researcher
+        - summarizer
+
+    # Researcher: gathers information for a given topic.
+    - name: researcher
+      swarmAgent: researcher-agent
+
+    # Summarizer: condenses research output into actionable reports.
+    - name: summarizer
+      swarmAgent: summarizer-agent
+---
+# SwarmAgent definitions referenced by the dynamic-mode team above.
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmAgent
+metadata:
+  name: coordinator-agent
+  namespace: default
+spec:
+  model: llama3.2
+  systemPrompt: |
+    You are a research coordinator. Break complex questions into sub-tasks,
+    delegate them to the researcher and summarizer roles and synthesize
+    the final answer. Use the delegate() tool to assign work.
+  replicas: 1
+---
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmAgent
+metadata:
+  name: researcher-agent
+  namespace: default
+spec:
+  model: llama3.2
+  systemPrompt: |
+    You are a research specialist. Gather detailed information on the topic
+    provided and return structured findings.
+  replicas: 2
+  mcpServers:
+    - name: web-search
+      url: https://search.mcp.example.com/sse
+---
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmAgent
+metadata:
+  name: summarizer-agent
+  namespace: default
+spec:
+  model: llama3.2:1b
+  systemPrompt: |
+    You are a summarization specialist. Condense the provided research
+    into a concise, well-structured report.
+  replicas: 1

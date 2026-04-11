@@ -1,0 +1,123 @@
+# RFC-0020: Agent-as-Tool sample
+#
+# Demonstrates the full agent-as-tool flow:
+#   1. database-agent exposes SQL capabilities via the MCP gateway (exposeMCP: true).
+#   2. analyst-agent references database-agent as an MCP server using swarmAgentRef.
+#      The operator resolves this to the gateway URL at reconcile time.
+#   3. When analyst-agent reasons, it calls database-agent mid-task as an LLM tool.
+#
+# Apply with:
+#   kubectl apply -f config/samples/kubeswarm_v1alpha1_agent_as_tool.yaml
+#
+# Verify gateway exposure:
+#   swarm mcp list -n default
+#
+# Trigger analyst-agent with a question:
+#   swarm submit -n default --agent analyst-agent \
+#     "Which customers have shipped orders? What is their total spend?"
+---
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmAgent
+metadata:
+  name: database-agent
+  namespace: default
+spec:
+  replicas: 1
+  model: claude-sonnet-4-20250514
+  systemPrompt: |
+    You are a database agent. You have access to the following tables:
+
+    Table: orders (id INT, customer TEXT, product TEXT, amount DECIMAL, status TEXT)
+    1, alice, widget-a, 120.00, shipped
+    2, bob,   widget-b,  45.50, pending
+    3, alice, widget-c, 200.00, shipped
+    4, carol, widget-a,  89.00, failed
+    5, bob,   widget-c,  60.00, shipped
+
+    Table: products (id TEXT, name TEXT, category TEXT, unit_price DECIMAL)
+    widget-a, Standard Widget,  hardware, 120.00
+    widget-b, Basic Widget,     hardware,  45.50
+    widget-c, Premium Widget,   hardware, 200.00
+
+    When the tool "query_database" is called, interpret the SQL SELECT against
+    the data above and return results as a JSON array of objects.
+    When the tool "describe_schema" is called, return table definitions as JSON.
+    Only support SELECT. Reject any other statement with an error message.
+  capabilities:
+    - id: query_database
+      description: >
+        Execute a read-only SQL query against the application database and return
+        results as a JSON array. Supports SELECT only.
+      exposeMCP: true
+      inputSchema: |
+        {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "SQL SELECT statement to execute"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum rows to return (default 100)",
+              "default": 100
+            }
+          },
+          "required": ["query"]
+        }
+    - id: describe_schema
+      description: >
+        Return the schema (tables, columns, types) for the database
+        or a specific table.
+      exposeMCP: true
+      inputSchema: |
+        {
+          "type": "object",
+          "properties": {
+            "table": {
+              "type": "string",
+              "description": "Table name to describe (omit to list all tables)"
+            }
+          }
+        }
+  limits:
+    maxTokensPerCall: 2000
+    maxConcurrentTasks: 10
+    timeoutSeconds: 30
+---
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmAgent
+metadata:
+  name: analyst-agent
+  namespace: default
+spec:
+  replicas: 1
+  model: claude-sonnet-4-20250514
+  systemPrompt: |
+    You are a senior data analyst. When answering questions about the business,
+    always query the database first using your available tools rather than guessing.
+    Present findings as concise bullet points with supporting numbers.
+    If you need to understand the data structure first, call describe_schema before querying.
+  capabilities:
+    - id: analyze
+      description: >
+        Answer a business question by querying the database and returning
+        a concise analysis with supporting figures.
+      exposeMCP: true
+      inputSchema: |
+        {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string", "description": "Business question to answer" }
+          },
+          "required": ["query"]
+        }
+  mcpServers:
+    # swarmAgentRef wires analyst-agent to database-agent via the MCP gateway.
+    # The operator resolves this to the correct SSE URL at reconcile time.
+    - name: database
+      swarmAgentRef: database-agent
+  limits:
+    maxTokensPerCall: 4000
+    maxConcurrentTasks: 3
+    timeoutSeconds: 120

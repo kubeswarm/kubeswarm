@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Validate commit message follows Conventional Commits.
+# Allowed prefixes: feat, fix, docs, chore, refactor, test, ci
+
+msg=$(head -1 "$1")
+
+if ! echo "$msg" | grep -qE '^(feat|fix|docs|chore|refactor|test|ci): .+'; then
+  echo ""
+  echo "ERROR: Commit message must follow Conventional Commits format:"
+  echo ""
+  echo "  <type>: <short description>"
+  echo ""
+  echo "  Allowed types: feat, fix, docs, chore, refactor, test, ci"
+  echo ""
+  echo "  Got: $msg"
+  echo ""
+  exit 1
+fi
+
+# First line must be under 72 characters.
+if [ ${#msg} -gt 72 ]; then
+  echo ""
+  echo "ERROR: Commit message first line must be under 72 characters (got ${#msg})."
+  echo ""
+  exit 1
+fi

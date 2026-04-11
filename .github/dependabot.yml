@@ -1,0 +1,56 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    assignees:
+      - rdmnl
+    reviewers:
+      - rdmnl
+    groups:
+      kubernetes:
+        patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"
+      opentelemetry:
+        patterns:
+          - "go.opentelemetry.io/*"
+
+  - package-ecosystem: gomod
+    directory: /runtime
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    assignees:
+      - rdmnl
+    reviewers:
+      - rdmnl
+    groups:
+      llm-providers:
+        patterns:
+          - "github.com/anthropics/*"
+          - "github.com/openai/*"
+          - "google.golang.org/genai"
+      cloud-storage:
+        patterns:
+          - "github.com/aws/*"
+          - "cloud.google.com/*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    labels:
+      - dependencies
+    assignees:
+      - rdmnl
+    reviewers:
+      - rdmnl

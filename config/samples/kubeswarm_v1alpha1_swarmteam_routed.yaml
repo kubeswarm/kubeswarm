@@ -1,0 +1,89 @@
+# Routed-mode SwarmTeam (RFC-0019)
+#
+# This team has no pipeline and no roles. Tasks are dispatched automatically
+# to the best-matching standalone SwarmAgent via an LLM router call against
+# the namespace SwarmRegistry.
+#
+# Usage:
+#   swarm trigger capability-router -n ai-ops --input '{"task": "find users who signed up last week"}'
+---
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmTeam
+metadata:
+  name: capability-router
+  namespace: ai-ops
+spec:
+  routing:
+    # registryRef: omit to auto-discover the first SwarmRegistry in the namespace
+    model: claude-haiku-4-5-20251001   # lightweight model - router calls are inexpensive
+    fallback: general-assistant        # used when no capability matches
+  timeoutSeconds: 120
+---
+# Standalone capability agents registered in the namespace SwarmRegistry.
+# These are NOT part of any team - they are discovered and dispatched by the router.
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmAgent
+metadata:
+  name: sql-analyst
+  namespace: ai-ops
+spec:
+  model: claude-sonnet-4-6
+  systemPrompt: |
+    You are a SQL analyst. Given a question about data, write and explain the SQL
+    query that answers it. Return the query in a ```sql block and follow with
+    a brief plain-language explanation.
+  capabilities:
+    - id: sql-analysis
+      description: >
+        Analyze data questions and produce SQL queries. Use for any task
+        involving databases, tables, aggregations, or structured data queries.
+      tags: [data, sql, analytics]
+  limits:
+    maxTokensPerCall: 4000
+    timeoutSeconds: 60
+---
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmAgent
+metadata:
+  name: code-reviewer
+  namespace: ai-ops
+spec:
+  model: claude-sonnet-4-6
+  systemPrompt: |
+    You are a code reviewer. Review the provided code for correctness, security
+    vulnerabilities and best practices. Return a structured review with:
+    - Summary
+    - Issues found (severity: critical / warning / info)
+    - Suggested fixes
+  capabilities:
+    - id: code-review
+      description: >
+        Review source code for bugs, security vulnerabilities and best practices.
+        Use for any task involving code files, pull requests, or diff reviews.
+      tags: [code, security, review]
+  limits:
+    maxTokensPerCall: 8000
+    timeoutSeconds: 90
+---
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmAgent
+metadata:
+  name: general-assistant
+  namespace: ai-ops
+spec:
+  model: claude-haiku-4-5-20251001
+  systemPrompt: |
+    You are a general-purpose assistant. Answer questions clearly and helpfully.
+  # No capabilities declared - used only as fallback by the router.
+  limits:
+    maxTokensPerCall: 2000
+    timeoutSeconds: 30
+---
+# SwarmRegistry indexes all agents in the namespace that declare capabilities.
+apiVersion: kubeswarm/v1alpha1
+kind: SwarmRegistry
+metadata:
+  name: ops-registry
+  namespace: ai-ops
+spec:
+  scope: namespace-scoped

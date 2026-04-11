@@ -1,0 +1,51 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/*
+runtime/bin/*
+Dockerfile.cross
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+cover.out
+
+# Go workspace file
+go.work
+
+# Vendor directory - never commit
+vendor/
+
+# editor and IDE paraphernalia
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Kubeconfig might contain secrets
+*.kubeconfig
+
+# Build artifacts
+dist/
+
+# Compiled binaries
+/kubeswarm-controller
+/kubeswarm-runtime
+/main
+
+# Local environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Coverage reports
+cover.html
+
+# OS junk
+.DS_Store

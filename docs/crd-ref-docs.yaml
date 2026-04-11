@@ -1,0 +1,16 @@
+processor:
+  # Strip standard Kubernetes boilerplate embedded in every CR.
+  ignoreFields:
+    - TypeMeta
+    - ObjectMeta
+
+render:
+  # Kubernetes version shown in the generated header.
+  kubernetesVersion: "1.33"
+  # Don't repeat the package path in every type heading - all types are in v1alpha1.
+  showPackageName: false
+  # Group output by Kind so each CRD is its own section.
+  groupByKind: true
+  # Suppress fields that exist only on lists (no user-facing value).
+  hideFieldTypes:
+    - ListMeta
