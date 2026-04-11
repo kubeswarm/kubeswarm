@@ -23,6 +23,7 @@ GOVULNCHECK_VERSION    ?= v1.1.4
 GO_LICENSES_VERSION    ?= v1.6.0
 CONTROLLER_GEN_VERSION ?= v0.20.1
 KUSTOMIZE_VERSION      ?= v5.8.1
+CRD_REF_DOCS_VERSION   ?= v0.3.0
 TRUFFLEHOG_VERSION     ?= 3.88.2
 
 # Tool paths.
@@ -31,6 +32,7 @@ GOVULNCHECK    = $(LOCALBIN)/govulncheck
 GO_LICENSES    = $(LOCALBIN)/go-licenses
 CONTROLLER_GEN = $(LOCALBIN)/controller-gen
 KUSTOMIZE      = $(LOCALBIN)/kustomize
+CRD_REF_DOCS   = $(LOCALBIN)/crd-ref-docs
 ENVTEST        = $(LOCALBIN)/setup-envtest
 TRUFFLEHOG     = $(LOCALBIN)/trufflehog
 
@@ -73,6 +75,24 @@ manifests: controller-gen ## Regenerate CRDs and RBAC after marker changes.
 	@GOWORK=off "$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 
 HELM_CHART ?= ../helm-charts/charts/kubeswarm
+
+DOCS_PATH ?= ../kubeswarm-docs/docs/reference/api.md
+
+.PHONY: docs-api
+docs-api: crd-ref-docs ## Generate API reference docs from Go types.
+	@GOWORK=off "$(CRD_REF_DOCS)" \
+		--source-path=./api/v1alpha1 \
+		--config=./docs/crd-ref-docs.yaml \
+		--output-path=/tmp/swarm-api-ref.md \
+		--renderer=markdown
+	@printf -- '---\nid: api\ntitle: API Reference\nsidebar_position: 1\ndescription: Complete field reference for all kubeswarm/v1alpha1 CRDs.\n---\n\n' > $(DOCS_PATH)
+	@sed 's/<\([a-zA-Z][a-zA-Z0-9_:-]*\)>/\&lt;\1\&gt;/g' /tmp/swarm-api-ref.md \
+		| sed 's/<\/\([a-zA-Z][a-zA-Z0-9_:-]*\)>/\&lt;\/\1\&gt;/g' \
+		| sed 's/Optional: \\{\\}/Optional: true/g' \
+		| sed 's/Required: \\{\\}/Required: true/g' \
+		| sed 's/{{/\&#123;\&#123;/g' \
+		| sed 's/}}/\&#125;\&#125;/g' >> $(DOCS_PATH)
+	@echo "Generated API reference -> $(DOCS_PATH)"
 
 .PHONY: helm-sync
 helm-sync: manifests ## Sync CRDs into the Helm chart and verify RBAC alignment.
@@ -422,6 +442,11 @@ $(GO_LICENSES): $(LOCALBIN)
 controller-gen: $(CONTROLLER_GEN)
 $(CONTROLLER_GEN): $(LOCALBIN)
 	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_GEN_VERSION))
+
+.PHONY: crd-ref-docs
+crd-ref-docs: $(CRD_REF_DOCS)
+$(CRD_REF_DOCS): $(LOCALBIN)
+	$(call go-install-tool,$(CRD_REF_DOCS),github.com/elastic/crd-ref-docs,$(CRD_REF_DOCS_VERSION))
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE)

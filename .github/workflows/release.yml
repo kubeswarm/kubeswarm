@@ -225,13 +225,12 @@ jobs:
             --field event_type=operator-released \
             --field "client_payload[version]=${GITHUB_REF_NAME#v}"
 
-      # TODO: enable when docs sync is ready
-      # - name: Dispatch docs sync
-      #   if: ${{ !contains(github.ref_name, '-') }}
-      #   env:
-      #     GH_TOKEN: ${{ secrets.HELM_SYNC_TOKEN }}
-      #   run: |
-      #     gh api repos/kubeswarm/kubeswarm-docs/dispatches \
-      #       --method POST \
-      #       --field event_type=operator-released \
-      #       --field "client_payload[version]=${GITHUB_REF_NAME#v}"
+      - name: Dispatch docs sync
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          GH_TOKEN: ${{ secrets.HELM_SYNC_TOKEN }}
+        run: |
+          gh api repos/kubeswarm/kubeswarm-docs/dispatches \
+            --method POST \
+            --field event_type=operator-released \
+            --field "client_payload[version]=${GITHUB_REF_NAME#v}"
