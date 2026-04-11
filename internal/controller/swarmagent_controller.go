@@ -917,8 +917,10 @@ func buildVectorStoreMemoryEnvVars(vs *kubeswarmv1alpha1.VectorStoreMemoryConfig
 }
 
 // vectorStoreURL builds AGENT_VECTOR_STORE_URL from a VectorStoreMemoryConfig.
-// Format: {provider}://{host:port}/{collection}
+// Format: {scheme}://{host:port}/{collection}
 // The Endpoint field may be "http://host:port" or just "host:port"; both are handled.
+// The pgvector provider maps to the standard "postgres" URI scheme so the runtime
+// can resolve the backend via its registered "postgres" factory.
 func vectorStoreURL(vs *kubeswarmv1alpha1.VectorStoreMemoryConfig) string {
 	if vs.Provider == "" || vs.Endpoint == "" {
 		return ""
@@ -932,7 +934,11 @@ func vectorStoreURL(vs *kubeswarmv1alpha1.VectorStoreMemoryConfig) string {
 	if collection == "" {
 		collection = "agent-memories"
 	}
-	return fmt.Sprintf("%s://%s/%s", vs.Provider, host, collection)
+	scheme := string(vs.Provider)
+	if vs.Provider == kubeswarmv1alpha1.VectorStoreProviderPgvector {
+		scheme = "postgres"
+	}
+	return fmt.Sprintf("%s://%s/%s", scheme, host, collection)
 }
 
 // buildMemoryEnvVars returns env vars for the SwarmMemory backend (Redis or vector-store).

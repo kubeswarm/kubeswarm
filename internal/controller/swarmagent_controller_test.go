@@ -212,8 +212,8 @@ var _ = Describe("buildVectorStoreMemoryEnvVars", func() {
 
 	It("injects VECTOR_STORE_API_KEY from SecretRef when set", func() {
 		vs := &kubeswarmv1alpha1.VectorStoreMemoryConfig{
-			Provider:  kubeswarmv1alpha1.VectorStoreProviderPinecone,
-			Endpoint:  "https://pinecone.io",
+			Provider:  kubeswarmv1alpha1.VectorStoreProviderPgvector,
+			Endpoint:  "postgres://pgvector:5432/vectors",
 			SecretRef: &corev1.LocalObjectReference{Name: "vs-secret"},
 		}
 		envs := buildVectorStoreMemoryEnvVars(vs)
@@ -234,8 +234,8 @@ var _ = Describe("buildVectorStoreMemoryEnvVars", func() {
 
 	It("includes TTL env when TTLSeconds > 0", func() {
 		vs := &kubeswarmv1alpha1.VectorStoreMemoryConfig{
-			Provider:   kubeswarmv1alpha1.VectorStoreProviderWeaviate,
-			Endpoint:   "http://weaviate:8080",
+			Provider:   kubeswarmv1alpha1.VectorStoreProviderPgvector,
+			Endpoint:   "postgres://pgvector:5432/vectors",
 			TTLSeconds: 3600,
 		}
 		envs := buildVectorStoreMemoryEnvVars(vs)
