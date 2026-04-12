@@ -29,10 +29,6 @@ spec:
     - jsonPath: .status.readyReplicas
       name: Ready
       type: integer
-    - jsonPath: .status.pendingTasks
-      name: Pending
-      priority: 1
-      type: integer
     - jsonPath: .status.dailyTokenUsage.totalTokens
       name: Tokens(24h)
       priority: 1
@@ -132,6 +128,7 @@ spec:
                   x-kubernetes-validations:
                   - message: exactly one of agentRef or capabilityRef must be set
                     rule: has(self.agentRef) != has(self.capabilityRef)
+                maxItems: 50
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -176,10 +173,12 @@ spec:
                         A lookup matches agents that declare ALL listed tags.
                       items:
                         type: string
+                      maxItems: 100
                       type: array
                   required:
                   - name
                   type: object
+                maxItems: 200
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -293,6 +292,7 @@ spec:
                           When set, only listed tool calls are permitted. Deny takes precedence over allow.
                         items:
                           type: string
+                        maxItems: 100
                         type: array
                       deny:
                         description: |-
@@ -301,6 +301,7 @@ spec:
                           Deny takes precedence over allow when both match.
                         items:
                           type: string
+                        maxItems: 100
                         type: array
                       trust:
                         description: Trust configures the default trust level and
@@ -316,11 +317,6 @@ spec:
                             - external
                             - sandbox
                             type: string
-                          enforceInputValidation:
-                            description: |-
-                              EnforceInputValidation rejects tool calls whose arguments do not match the
-                              tool's declared schema when the tool's effective trust level is sandbox.
-                            type: boolean
                         type: object
                     type: object
                 type: object
@@ -432,29 +428,23 @@ spec:
                               server.
                             minLength: 1
                             type: string
-                          tls:
+                          tlsSecretRef:
                             description: |-
-                              TLS configures mTLS for the gRPC connection.
+                              TLSSecretRef references a Secret containing TLS credentials for mTLS.
+                              The Secret must contain tls.crt, tls.key, and ca.crt.
                               When not set the connection is plaintext.
                             properties:
-                              secretRef:
-                                description: SecretRef names the Secret containing
-                                  the TLS credentials.
-                                properties:
-                                  name:
-                                    default: ""
-                                    description: |-
-                                      Name of the referent.
-                                      This field is effectively required, but due to backwards compatibility is
-                                      allowed to be empty. Instances of this type with an empty value here are
-                                      almost certainly wrong.
-                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                                    type: string
-                                type: object
-                                x-kubernetes-map-type: atomic
-                            required:
-                            - secretRef
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
                             type: object
+                            x-kubernetes-map-type: atomic
                         required:
                         - address
                         type: object
@@ -468,29 +458,23 @@ spec:
                               server.
                             minLength: 1
                             type: string
-                          tls:
+                          tlsSecretRef:
                             description: |-
-                              TLS configures mTLS for the gRPC connection.
+                              TLSSecretRef references a Secret containing TLS credentials for mTLS.
+                              The Secret must contain tls.crt, tls.key, and ca.crt.
                               When not set the connection is plaintext.
                             properties:
-                              secretRef:
-                                description: SecretRef names the Secret containing
-                                  the TLS credentials.
-                                properties:
-                                  name:
-                                    default: ""
-                                    description: |-
-                                      Name of the referent.
-                                      This field is effectively required, but due to backwards compatibility is
-                                      allowed to be empty. Instances of this type with an empty value here are
-                                      almost certainly wrong.
-                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                                    type: string
-                                type: object
-                                x-kubernetes-map-type: atomic
-                            required:
-                            - secretRef
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
                             type: object
+                            x-kubernetes-map-type: atomic
                         required:
                         - address
                         type: object
@@ -627,15 +611,6 @@ spec:
                     - message: redaction.secrets must be true when llmTurns is enabled
                       rule: '!has(self.llmTurns) || !self.llmTurns || (has(self.redaction)
                         && self.redaction.secrets)'
-                  metrics:
-                    description: Metrics controls Prometheus metrics exposure.
-                    properties:
-                      enabled:
-                        default: false
-                        description: Enabled exposes a /metrics endpoint on the agent
-                          pod for Prometheus scraping.
-                        type: boolean
-                    type: object
                 type: object
               prompt:
                 description: Prompt configures the agent's system prompt.
@@ -999,6 +974,7 @@ spec:
                       type: string
                   type: object
                   x-kubernetes-map-type: atomic
+                maxItems: 50
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -1187,6 +1163,7 @@ spec:
                       x-kubernetes-validations:
                       - message: exactly one of url or capabilityRef must be set
                         rule: has(self.url) != has(self.capabilityRef)
+                    maxItems: 50
                     type: array
                     x-kubernetes-list-map-keys:
                     - name
@@ -1240,6 +1217,7 @@ spec:
                       - name
                       - url
                       type: object
+                    maxItems: 50
                     type: array
                     x-kubernetes-list-map-keys:
                     - name
@@ -1362,16 +1340,13 @@ spec:
                   registered at the MCP gateway.
                 items:
                   type: string
+                maxItems: 100
                 type: array
+                x-kubernetes-list-type: set
               observedGeneration:
                 description: ObservedGeneration is the .metadata.generation this status
                   reflects.
                 format: int64
-                type: integer
-              pendingTasks:
-                description: PendingTasks is the current number of tasks waiting in
-                  the queue for this agent.
-                format: int32
                 type: integer
               readyReplicas:
                 description: ReadyReplicas is the number of agent pods ready to accept

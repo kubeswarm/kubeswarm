@@ -105,18 +105,12 @@ spec:
                           0 means no explicit budget - the agent uses its own judgement.
                         type: integer
                     type: object
-                  extract:
-                    description: Extract configures field or pattern extraction. Only
-                      used when strategy=extract.
-                    properties:
-                      path:
-                        description: |-
-                          Path is evaluated as a JSONPath expression when the step output is valid JSON,
-                          or as a Go regexp (first capture group) for prose output.
-                        type: string
-                    required:
-                    - path
-                    type: object
+                  extractPath:
+                    description: |-
+                      ExtractPath is evaluated as a JSONPath expression when the step output is valid JSON,
+                      or as a Go regexp (first capture group) for prose output.
+                      Only used when strategy=extract.
+                    type: string
                   strategy:
                     default: full
                     description: |-
@@ -190,18 +184,12 @@ spec:
                                 0 means no explicit budget - the agent uses its own judgement.
                               type: integer
                           type: object
-                        extract:
-                          description: Extract configures field or pattern extraction.
+                        extractPath:
+                          description: |-
+                            ExtractPath is evaluated as a JSONPath expression when the step output is valid JSON,
+                            or as a Go regexp (first capture group) for prose output.
                             Only used when strategy=extract.
-                          properties:
-                            path:
-                              description: |-
-                                Path is evaluated as a JSONPath expression when the step output is valid JSON,
-                                or as a Go regexp (first capture group) for prose output.
-                              type: string
-                          required:
-                          - path
-                          type: object
+                          type: string
                         strategy:
                           default: full
                           description: |-
@@ -224,6 +212,7 @@ spec:
                         complete before this step runs.
                       items:
                         type: string
+                      maxItems: 20
                       type: array
                     if:
                       description: |-
@@ -301,6 +290,7 @@ spec:
                         required:
                         - name
                         type: object
+                      maxItems: 20
                       type: array
                     outputSchema:
                       description: OutputSchema is an optional JSON Schema string
@@ -350,6 +340,7 @@ spec:
                             ALL listed tags.
                           items:
                             type: string
+                          maxItems: 100
                           type: array
                       required:
                       - capability
@@ -382,8 +373,8 @@ spec:
                           default: fail
                           description: |-
                             OnFailure controls what happens when validation fails.
-                            "fail" (default) marks the step Failed immediately.
-                            "retry" resets the step to Pending for re-execution.
+                            OnFailureFail (default) marks the step Failed immediately.
+                            OnFailureRetry resets the step to Pending for re-execution.
                           enum:
                           - fail
                           - retry
@@ -397,6 +388,7 @@ spec:
                             Example: ["(?i)ignore.*previous.*instructions", "(?i)act as"]
                           items:
                             type: string
+                          maxItems: 50
                           type: array
                         schema:
                           description: |-
@@ -419,6 +411,7 @@ spec:
                   required:
                   - role
                   type: object
+                maxItems: 100
                 type: array
               prompt:
                 description: |-
@@ -438,6 +431,7 @@ spec:
                         Empty means this is a leaf role - it cannot delegate further.
                       items:
                         type: string
+                      maxItems: 20
                       type: array
                     envFrom:
                       description: |-
@@ -595,29 +589,23 @@ spec:
                                 server.
                               minLength: 1
                               type: string
-                            tls:
+                            tlsSecretRef:
                               description: |-
-                                TLS configures mTLS for the gRPC connection.
+                                TLSSecretRef references a Secret containing TLS credentials for mTLS.
+                                The Secret must contain tls.crt, tls.key, and ca.crt.
                                 When not set the connection is plaintext.
                               properties:
-                                secretRef:
-                                  description: SecretRef names the Secret containing
-                                    the TLS credentials.
-                                  properties:
-                                    name:
-                                      default: ""
-                                      description: |-
-                                        Name of the referent.
-                                        This field is effectively required, but due to backwards compatibility is
-                                        allowed to be empty. Instances of this type with an empty value here are
-                                        almost certainly wrong.
-                                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                                      type: string
-                                  type: object
-                                  x-kubernetes-map-type: atomic
-                              required:
-                              - secretRef
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
                               type: object
+                              x-kubernetes-map-type: atomic
                           required:
                           - address
                           type: object
@@ -631,29 +619,23 @@ spec:
                                 server.
                               minLength: 1
                               type: string
-                            tls:
+                            tlsSecretRef:
                               description: |-
-                                TLS configures mTLS for the gRPC connection.
+                                TLSSecretRef references a Secret containing TLS credentials for mTLS.
+                                The Secret must contain tls.crt, tls.key, and ca.crt.
                                 When not set the connection is plaintext.
                               properties:
-                                secretRef:
-                                  description: SecretRef names the Secret containing
-                                    the TLS credentials.
-                                  properties:
-                                    name:
-                                      default: ""
-                                      description: |-
-                                        Name of the referent.
-                                        This field is effectively required, but due to backwards compatibility is
-                                        allowed to be empty. Instances of this type with an empty value here are
-                                        almost certainly wrong.
-                                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                                      type: string
-                                  type: object
-                                  x-kubernetes-map-type: atomic
-                              required:
-                              - secretRef
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
                               type: object
+                              x-kubernetes-map-type: atomic
                           required:
                           - address
                           type: object
@@ -1182,6 +1164,7 @@ spec:
                             - message: exactly one of url or capabilityRef must be
                                 set
                               rule: has(self.url) != has(self.capabilityRef)
+                          maxItems: 50
                           type: array
                           x-kubernetes-list-map-keys:
                           - name
@@ -1236,6 +1219,7 @@ spec:
                             - name
                             - url
                             type: object
+                          maxItems: 50
                           type: array
                           x-kubernetes-list-map-keys:
                           - name
@@ -1249,6 +1233,7 @@ spec:
                       may be set
                     rule: '!(has(self.swarmAgent) && has(self.swarmTeam)) && !(has(self.swarmAgent)
                       && has(self.model)) && !(has(self.swarmTeam) && has(self.model))'
+                maxItems: 50
                 type: array
               routing:
                 description: |-
@@ -1261,14 +1246,6 @@ spec:
                       matches or the router LLM fails to select one.
                       When absent and no match is found, the run fails with RoutingFailed.
                     type: string
-                  maxHops:
-                    default: 1
-                    description: |-
-                      MaxHops is the maximum number of sequential routing decisions per run.
-                      Reserved for future multi-hop support. Must be 1 in this version.
-                    maximum: 1
-                    minimum: 1
-                    type: integer
                   model:
                     description: |-
                       Model is the LLM model used for the router call.
@@ -1568,6 +1545,7 @@ spec:
                   - name
                   - phase
                   type: object
+                maxItems: 100
                 type: array
               totalCostUSD:
                 description: |-

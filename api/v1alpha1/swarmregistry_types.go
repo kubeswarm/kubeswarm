@@ -32,21 +32,6 @@ const (
 	RegistryScopeCluster RegistryScope = "cluster-wide"
 )
 
-// SwarmRegistryPolicy controls delegation safety for registry-resolved steps.
-type SwarmRegistryPolicy struct {
-	// MaxDepth is the maximum agent-to-agent delegation depth.
-	// Prevents runaway recursion.
-	// +kubebuilder:default=3
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=20
-	MaxDepth int `json:"maxDepth,omitempty"`
-
-	// AllowCrossTeam permits resolution of agents managed by other SwarmTeams.
-	// Default false - only agents not owned by another team's inline roles.
-	// +kubebuilder:default=false
-	AllowCrossTeam bool `json:"allowCrossTeam,omitempty"`
-}
-
 // MCPBinding maps a capability ID to the MCP server URL that provides it in this deployment.
 // Used to resolve MCPServerSpec.capabilityRef at reconcile time so that shared agent
 // definitions (e.g. from cookbook) remain URL-free.
@@ -71,15 +56,20 @@ type SwarmRegistrySpec struct {
 	// +kubebuilder:validation:Enum=namespace-scoped;cluster-wide
 	Scope RegistryScope `json:"scope,omitempty"`
 
-	// Policy controls delegation safety.
+	// MaxDepth is the maximum agent-to-agent delegation depth allowed for registry-resolved steps.
+	// Prevents runaway recursion.
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=20
 	// +optional
-	Policy *SwarmRegistryPolicy `json:"policy,omitempty"`
+	MaxDepth int `json:"maxDepth,omitempty"`
 
 	// MCPBindings maps capability IDs to MCP server URLs for this deployment.
 	// Agents that declare mcpServers with capabilityRef have their URLs resolved
 	// from this list at reconcile time. This allows cookbook-style agent definitions
 	// to remain URL-free; operators supply the bindings per namespace.
 	// +optional
+	// +kubebuilder:validation:MaxItems=50
 	MCPBindings []MCPBinding `json:"mcpBindings,omitempty"`
 }
 
@@ -91,8 +81,10 @@ type IndexedCapability struct {
 	// first agent that declares it. Used by the router LLM to select the right agent.
 	Description string `json:"description,omitempty"`
 	// Agents is the list of SwarmAgent names that advertise this capability.
+	// +kubebuilder:validation:MaxItems=1000
 	Agents []string `json:"agents,omitempty"`
 	// Tags is the union of all tags declared for this capability across all agents.
+	// +kubebuilder:validation:MaxItems=100
 	Tags []string `json:"tags,omitempty"`
 }
 
@@ -109,6 +101,7 @@ type AgentFleetEntry struct {
 	DailyTokens int64 `json:"dailyTokens,omitempty"`
 	// Capabilities lists the capability IDs this agent contributes to the index.
 	// +optional
+	// +kubebuilder:validation:MaxItems=200
 	Capabilities []string `json:"capabilities,omitempty"`
 }
 
@@ -121,6 +114,7 @@ type SwarmRegistryStatus struct {
 	// with per-agent readiness and token usage. Replaces the implicit
 	// "all agents in namespace" model with an explicit opt-in list.
 	// +optional
+	// +kubebuilder:validation:MaxItems=1000
 	Fleet []AgentFleetEntry `json:"fleet,omitempty"`
 
 	// LastRebuild is the time the index was last rebuilt.
@@ -129,6 +123,7 @@ type SwarmRegistryStatus struct {
 
 	// Capabilities lists all capabilities indexed, with their associated agents and tags.
 	// +optional
+	// +kubebuilder:validation:MaxItems=200
 	Capabilities []IndexedCapability `json:"capabilities,omitempty"`
 
 	// ObservedGeneration is the .metadata.generation this status reflects.

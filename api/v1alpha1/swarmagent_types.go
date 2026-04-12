@@ -189,12 +189,14 @@ type AgentTools struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=50
 	MCP []MCPToolSpec `json:"mcp,omitempty"`
 
 	// Webhooks lists inline single-endpoint HTTP tools.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=50
 	Webhooks []WebhookToolSpec `json:"webhooks,omitempty"`
 }
 
@@ -280,6 +282,7 @@ type AgentCapability struct {
 	// Tags enable coarse-grained filtering in registry lookups.
 	// A lookup matches agents that declare ALL listed tags.
 	// +optional
+	// +kubebuilder:validation:MaxItems=100
 	Tags []string `json:"tags,omitempty"`
 
 	// ExposeMCP registers this capability as a named tool at the MCP gateway endpoint
@@ -311,11 +314,6 @@ type ToolTrustPolicy struct {
 	// +kubebuilder:default=external
 	// +optional
 	Default ToolTrustLevel `json:"default,omitempty"`
-
-	// EnforceInputValidation rejects tool calls whose arguments do not match the
-	// tool's declared schema when the tool's effective trust level is sandbox.
-	// +optional
-	EnforceInputValidation bool `json:"enforceInputValidation,omitempty"`
 }
 
 // ToolPermissions defines allow/deny lists and trust policy for tool calls.
@@ -324,12 +322,14 @@ type ToolPermissions struct {
 	// Wildcards are supported: "filesystem/*" allows all tools from the filesystem server.
 	// When set, only listed tool calls are permitted. Deny takes precedence over allow.
 	// +optional
+	// +kubebuilder:validation:MaxItems=100
 	Allow []string `json:"allow,omitempty"`
 
 	// Deny is a denylist of tool calls in "<server-name>/<tool-name>" format.
 	// Wildcards are supported: "shell/*" denies all shell tools.
 	// Deny takes precedence over allow when both match.
 	// +optional
+	// +kubebuilder:validation:MaxItems=100
 	Deny []string `json:"deny,omitempty"`
 
 	// Trust configures the default trust level and input validation policy.
@@ -611,13 +611,6 @@ const (
 	NetworkPolicyModeDisabled NetworkPolicyMode = "disabled"
 )
 
-// PluginTLSConfig references a Secret containing TLS credentials for a gRPC plugin.
-// The Secret must contain tls.crt, tls.key, and ca.crt.
-type PluginTLSConfig struct {
-	// SecretRef names the Secret containing the TLS credentials.
-	SecretRef corev1.LocalObjectReference `json:"secretRef"`
-}
-
 // PluginEndpoint defines a gRPC plugin connection address and optional TLS config.
 type PluginEndpoint struct {
 	// Address is the host:port of the gRPC plugin server.
@@ -625,10 +618,11 @@ type PluginEndpoint struct {
 	// +kubebuilder:validation:MinLength=1
 	Address string `json:"address"`
 
-	// TLS configures mTLS for the gRPC connection.
+	// TLSSecretRef references a Secret containing TLS credentials for mTLS.
+	// The Secret must contain tls.crt, tls.key, and ca.crt.
 	// When not set the connection is plaintext.
 	// +optional
-	TLS *PluginTLSConfig `json:"tls,omitempty"`
+	TLSSecretRef *corev1.LocalObjectReference `json:"tlsSecretRef,omitempty"`
 }
 
 // AgentPlugins configures external gRPC plugin overrides for the LLM provider and task queue.
@@ -761,14 +755,6 @@ type AgentLogging struct {
 	Redaction *LogRedactionPolicy `json:"redaction,omitempty"`
 }
 
-// AgentMetrics controls Prometheus-compatible metrics exposure for the agent runtime.
-type AgentMetrics struct {
-	// Enabled exposes a /metrics endpoint on the agent pod for Prometheus scraping.
-	// +kubebuilder:default=false
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-}
-
 // AuditLogMode controls the verbosity of audit event emission.
 // +kubebuilder:validation:Enum=off;actions;verbose
 type AuditLogMode string
@@ -812,10 +798,6 @@ type AgentObservability struct {
 	// +optional
 	Logging *AgentLogging `json:"logging,omitempty"`
 
-	// Metrics controls Prometheus metrics exposure.
-	// +optional
-	Metrics *AgentMetrics `json:"metrics,omitempty"`
-
 	// AuditLog configures the structured audit trail.
 	// When set, overrides namespace (SwarmSettings) and cluster (Helm) audit config.
 	// +optional
@@ -845,6 +827,7 @@ type SwarmAgentSpec struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=50
 	Settings []corev1.LocalObjectReference `json:"settings,omitempty"`
 
 	// Capabilities advertises what this agent can do to SwarmRegistry and the MCP gateway.
@@ -852,6 +835,7 @@ type SwarmAgentSpec struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=200
 	Capabilities []AgentCapability `json:"capabilities,omitempty"`
 
 	// --- Tools: what the agent can USE ---
@@ -866,6 +850,7 @@ type SwarmAgentSpec struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=50
 	Agents []AgentConnection `json:"agents,omitempty"`
 
 	// --- Guardrails: safety + cost controls ---
@@ -934,9 +919,6 @@ type SwarmAgentStatus struct {
 	// Nil for standalone agents not managed by a team autoscaler.
 	// +optional
 	DesiredReplicas *int32 `json:"desiredReplicas,omitempty"`
-	// PendingTasks is the current number of tasks waiting in the queue for this agent.
-	// +optional
-	PendingTasks *int32 `json:"pendingTasks,omitempty"`
 	// ObservedGeneration is the .metadata.generation this status reflects.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// DailyTokenUsage is the sum of tokens consumed in the rolling 24-hour window.
@@ -951,8 +933,10 @@ type SwarmAgentStatus struct {
 	// SystemPromptHash is the SHA-256 hex digest of the resolved system prompt last applied.
 	// +optional
 	SystemPromptHash string `json:"systemPromptHash,omitempty"`
+	// +listType=set
 	// ExposedMCPCapabilities lists the capability names currently registered at the MCP gateway.
 	// +optional
+	// +kubebuilder:validation:MaxItems=100
 	ExposedMCPCapabilities []string `json:"exposedMCPCapabilities,omitempty"`
 	// Conditions reflect the current state of the SwarmAgent.
 	// +listType=map
@@ -966,7 +950,6 @@ type SwarmAgentStatus struct {
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
 // +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.spec.runtime.replicas`
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
-// +kubebuilder:printcolumn:name="Pending",type=integer,JSONPath=`.status.pendingTasks`,priority=1
 // +kubebuilder:printcolumn:name="Tokens(24h)",type=integer,JSONPath=`.status.dailyTokenUsage.totalTokens`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:resource:scope=Namespaced,shortName={swagent,swagents},categories=kubeswarm

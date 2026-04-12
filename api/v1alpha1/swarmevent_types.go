@@ -108,6 +108,8 @@ type SwarmEventSpec struct {
 	// +kubebuilder:validation:Required
 	Source SwarmEventSource `json:"source"`
 
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=20
 	// Targets is the list of team pipelines to dispatch when the trigger fires.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1

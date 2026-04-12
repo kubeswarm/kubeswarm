@@ -91,9 +91,11 @@ type StepContextPolicy struct {
 	// +optional
 	Compress *ContextCompressConfig `json:"compress,omitempty"`
 
-	// Extract configures field or pattern extraction. Only used when strategy=extract.
+	// ExtractPath is evaluated as a JSONPath expression when the step output is valid JSON,
+	// or as a Go regexp (first capture group) for prose output.
+	// Only used when strategy=extract.
 	// +optional
-	Extract *ContextExtractConfig `json:"extract,omitempty"`
+	ExtractPath string `json:"extractPath,omitempty"`
 }
 
 // ContextCompressConfig configures the compression LLM call.
@@ -114,14 +116,6 @@ type ContextCompressConfig struct {
 	// When unset, a built-in summarisation prompt is used.
 	// +optional
 	Prompt string `json:"prompt,omitempty"`
-}
-
-// ContextExtractConfig configures field or pattern extraction.
-type ContextExtractConfig struct {
-	// Path is evaluated as a JSONPath expression when the step output is valid JSON,
-	// or as a Go regexp (first capture group) for prose output.
-	// +kubebuilder:validation:Required
-	Path string `json:"path"`
 }
 
 // PipelineStepStatus captures the observed state of a single step.
