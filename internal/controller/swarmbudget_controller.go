@@ -23,7 +23,6 @@ import (
 	"strconv"
 	"time"
 
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -71,7 +70,7 @@ func (r *SwarmBudgetReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	policy := r.BudgetPolicy
 	if policy == nil {
-		policy = costs.DefaultBudgetPolicy()
+		policy = &costs.StandardBudgetPolicy{}
 	}
 
 	// Scope: use the budget's own namespace as default if selector namespace is empty.
@@ -88,7 +87,7 @@ func (r *SwarmBudgetReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	input := costs.BudgetInput{
 		Namespace: ns,
 		Team:      budget.Spec.Selector.Team,
-		Period:    budget.Spec.Period,
+		Period:    costs.Period(budget.Spec.Period),
 		Limit:     limitFloat,
 		WarnAt:    budget.Spec.WarnAt,
 	}
@@ -130,7 +129,7 @@ func (r *SwarmBudgetReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	budget.Status.ObservedGeneration = budget.Generation
 
 	// Set period start if not already set or if it should roll over.
-	periodStart := costs.PeriodWindowStart(budget.Spec.Period)
+	periodStart := costs.PeriodWindowStart(costs.Period(budget.Spec.Period))
 	if budget.Status.PeriodStart == nil || budget.Status.PeriodStart.Before(&metav1.Time{Time: periodStart}) {
 		t := metav1.NewTime(periodStart)
 		budget.Status.PeriodStart = &t
@@ -195,22 +194,15 @@ func setBudgetCondition(budget *kubeswarmv1alpha1.SwarmBudget, decision costs.Bu
 	switch decision.Status {
 	case costs.BudgetExceeded:
 		status = metav1.ConditionFalse
-		reason = "BudgetExceeded"
+		reason = kubeswarmv1alpha1.ConditionBudgetExceeded
 	case costs.BudgetWarning:
 		status = metav1.ConditionFalse
-		reason = "BudgetWarning"
+		reason = kubeswarmv1alpha1.ConditionBudgetWarning
 	default:
 		status = metav1.ConditionTrue
-		reason = "OK"
+		reason = kubeswarmv1alpha1.ConditionBudgetOK
 	}
-	cond := metav1.Condition{
-		Type:               "Ready",
-		Status:             status,
-		Reason:             reason,
-		Message:            decision.Message,
-		ObservedGeneration: budget.Generation,
-	}
-	apimeta.SetStatusCondition(&budget.Status.Conditions, cond)
+	setCondition(&budget.Status.Conditions, budget.Generation, "", status, reason, decision.Message)
 }
 
 func (r *SwarmBudgetReconciler) SetupWithManager(mgr ctrl.Manager) error {

@@ -82,6 +82,7 @@ func newNotifyRateLimiter() *notifyRateLimiter {
 }
 
 // allow returns true when the event may fire (respects the configured window).
+// Expired entries are evicted from the map so it stays bounded to recently-fired keys.
 func (rl *notifyRateLimiter) allow(key rateLimitKey, windowSecs int) bool {
 	if windowSecs == 0 {
 		return true
@@ -92,7 +93,11 @@ func (rl *notifyRateLimiter) allow(key rateLimitKey, windowSecs int) bool {
 	if !ok {
 		return true
 	}
-	return time.Since(last) >= time.Duration(windowSecs)*time.Second
+	if time.Since(last) >= time.Duration(windowSecs)*time.Second {
+		delete(rl.fired, key) // evict expired entry; re-added by record() if it fires again
+		return true
+	}
+	return false
 }
 
 func (rl *notifyRateLimiter) record(key rateLimitKey) {
@@ -531,11 +536,22 @@ func (d *NotifyDispatcher) DispatchBudget(
 	d.dispatch(ctx, payload, policy)
 }
 
+// notifyTemplateCache caches parsed notification templates.
+var notifyTemplateCache sync.Map // map[string]*template.Template
+
 // renderTemplate renders a Go template with the payload as context.
+// Parsed templates are cached for repeated use with different payloads.
 func renderTemplate(tmplStr string, payload NotifyPayload) (string, error) {
-	tmpl, err := template.New("notify").Parse(tmplStr)
-	if err != nil {
-		return "", err
+	var tmpl *template.Template
+	if cached, ok := notifyTemplateCache.Load(tmplStr); ok {
+		tmpl = cached.(*template.Template)
+	} else {
+		var err error
+		tmpl, err = template.New("notify").Parse(tmplStr)
+		if err != nil {
+			return "", err
+		}
+		notifyTemplateCache.Store(tmplStr, tmpl)
 	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, payload); err != nil {

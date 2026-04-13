@@ -13,6 +13,7 @@ spec:
             - --leader-elect
             - --health-probe-bind-address=:8081
             - --agent-image=kubeswarm-runtime:dev
+            - --disable-admission-webhooks
           env:
             - name: TASK_QUEUE_URL
               value: redis://kubeswarm-redis.kubeswarm-system.svc.cluster.local:6379

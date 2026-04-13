@@ -18,6 +18,7 @@ package observability
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -165,6 +166,21 @@ func NewAgentMetrics() (*AgentMetrics, error) {
 	return am, nil
 }
 
+var (
+	agentMetricsOnce   sync.Once
+	globalAgentMetrics *AgentMetrics
+)
+
+// DefaultAgentMetrics returns a process-wide singleton AgentMetrics, creating it once.
+// Callers that need custom attributes per agent should use the metrics attrs pattern;
+// instruments are shared, only labels differ.
+func DefaultAgentMetrics() *AgentMetrics {
+	agentMetricsOnce.Do(func() {
+		globalAgentMetrics, _ = NewAgentMetrics()
+	})
+	return globalAgentMetrics
+}
+
 // RecordTaskStarted increments the started counter.
 func (am *AgentMetrics) RecordTaskStarted(ctx context.Context, attrs ...attribute.KeyValue) {
 	am.taskStarted.Add(ctx, 1, metric.WithAttributes(attrs...))
@@ -291,6 +307,12 @@ func (am *AgentMetrics) RecordCircuitRejected(ctx context.Context, attrs ...attr
 type OperatorMetrics struct {
 	reconcileDuration metric.Int64Histogram
 	reconcileErrors   metric.Int64Counter
+
+	policyViolation            metric.Int64Counter
+	policyConflict             metric.Int64Counter
+	policyAdmissionRejected    metric.Int64Counter
+	policyAdmissionWarned      metric.Int64Counter
+	policyAdmissionWouldReject metric.Int64Counter
 }
 
 // NewOperatorMetrics creates and registers all operator instruments.
@@ -308,6 +330,26 @@ func NewOperatorMetrics() (*OperatorMetrics, error) {
 		metric.WithDescription("Reconcile loops that returned an error")); err != nil {
 		return nil, err
 	}
+	if om.policyViolation, err = m.Int64Counter("kubeswarm.policy.violation",
+		metric.WithDescription("Policy violations detected on agents")); err != nil {
+		return nil, err
+	}
+	if om.policyConflict, err = m.Int64Counter("kubeswarm.policy.conflict",
+		metric.WithDescription("Merged policies with impossible constraints")); err != nil {
+		return nil, err
+	}
+	if om.policyAdmissionRejected, err = m.Int64Counter("kubeswarm.policy.admission.rejected",
+		metric.WithDescription("Agents rejected by policy webhook in Enforce mode")); err != nil {
+		return nil, err
+	}
+	if om.policyAdmissionWarned, err = m.Int64Counter("kubeswarm.policy.admission.warned",
+		metric.WithDescription("Agents warned by policy webhook in Warn mode")); err != nil {
+		return nil, err
+	}
+	if om.policyAdmissionWouldReject, err = m.Int64Counter("kubeswarm.policy.admission.would_reject",
+		metric.WithDescription("Agents that would be rejected in Audit mode")); err != nil {
+		return nil, err
+	}
 	return om, nil
 }
 
@@ -318,4 +360,34 @@ func (om *OperatorMetrics) RecordReconcile(ctx context.Context, since time.Time,
 	if failed {
 		om.reconcileErrors.Add(ctx, 1, opt)
 	}
+}
+
+// RecordPolicyViolation increments the policy violation counter with policy/agent/constraint labels.
+func (om *OperatorMetrics) RecordPolicyViolation(ctx context.Context, policyName, agentName, constraint string, attrs ...attribute.KeyValue) {
+	all := append([]attribute.KeyValue{
+		attribute.String("policy_name", policyName),
+		attribute.String("agent_name", agentName),
+		attribute.String("constraint", constraint),
+	}, attrs...)
+	om.policyViolation.Add(ctx, 1, metric.WithAttributes(all...))
+}
+
+// RecordPolicyConflict increments the policy conflict counter.
+func (om *OperatorMetrics) RecordPolicyConflict(ctx context.Context, attrs ...attribute.KeyValue) {
+	om.policyConflict.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordPolicyAdmissionRejected increments the Enforce-mode rejection counter.
+func (om *OperatorMetrics) RecordPolicyAdmissionRejected(ctx context.Context, attrs ...attribute.KeyValue) {
+	om.policyAdmissionRejected.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordPolicyAdmissionWarned increments the Warn-mode warning counter.
+func (om *OperatorMetrics) RecordPolicyAdmissionWarned(ctx context.Context, attrs ...attribute.KeyValue) {
+	om.policyAdmissionWarned.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordPolicyAdmissionWouldReject increments the Audit-mode would-reject counter.
+func (om *OperatorMetrics) RecordPolicyAdmissionWouldReject(ctx context.Context, attrs ...attribute.KeyValue) {
+	om.policyAdmissionWouldReject.Add(ctx, 1, metric.WithAttributes(attrs...))
 }

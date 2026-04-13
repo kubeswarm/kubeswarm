@@ -29,11 +29,10 @@ package queue
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
-	"sync"
 
 	agenterrors "github.com/kubeswarm/kubeswarm/pkg/agent/errors"
+	"github.com/kubeswarm/kubeswarm/pkg/registry"
 )
 
 // StreamDone is the sentinel chunk value that signals end-of-stream.
@@ -162,35 +161,22 @@ type QueueFactory func(url string, maxRetries int) (TaskQueue, error)
 type StreamFactory func(url string) (StreamChannel, error)
 
 var (
-	qmu       sync.RWMutex
-	qBackends = map[string]QueueFactory{}
-
-	smu       sync.RWMutex
-	sBackends = map[string]StreamFactory{}
+	qReg registry.Registry[QueueFactory]
+	sReg registry.Registry[StreamFactory]
 )
 
 // RegisterQueue makes a TaskQueue backend available under the given name.
 // It is typically called from an init() function in the backend package.
-func RegisterQueue(name string, f QueueFactory) {
-	qmu.Lock()
-	defer qmu.Unlock()
-	qBackends[name] = f
-}
+func RegisterQueue(name string, f QueueFactory) { qReg.Register(name, f) }
 
 // RegisterStream makes a StreamChannel backend available under the given name.
 // It is typically called from an init() function in the backend package.
-func RegisterStream(name string, f StreamFactory) {
-	smu.Lock()
-	defer smu.Unlock()
-	sBackends[name] = f
-}
+func RegisterStream(name string, f StreamFactory) { sReg.Register(name, f) }
 
 // NewQueue creates a TaskQueue by inferring the backend from the URL scheme.
 func NewQueue(url string, maxRetries int) (TaskQueue, error) {
 	name := Detect(url)
-	qmu.RLock()
-	f, ok := qBackends[name]
-	qmu.RUnlock()
+	f, ok := qReg.Lookup(name)
 	if !ok {
 		return nil, agenterrors.NewQueueError(agenterrors.ErrConfigInvalid, fmt.Sprintf("unknown task queue backend %q; available: %s", name, strings.Join(QueueBackends(), ", ")), nil)
 	}
@@ -200,9 +186,7 @@ func NewQueue(url string, maxRetries int) (TaskQueue, error) {
 // NewStream creates a StreamChannel by inferring the backend from the URL scheme.
 func NewStream(url string) (StreamChannel, error) {
 	name := Detect(url)
-	smu.RLock()
-	f, ok := sBackends[name]
-	smu.RUnlock()
+	f, ok := sReg.Lookup(name)
 	if !ok {
 		return nil, agenterrors.NewQueueError(agenterrors.ErrConfigInvalid, fmt.Sprintf("unknown stream channel backend %q; available: %s", name, strings.Join(StreamBackends(), ", ")), nil)
 	}
@@ -225,24 +209,7 @@ func Detect(url string) string {
 }
 
 // QueueBackends returns the names of all registered TaskQueue backends, sorted.
-func QueueBackends() []string {
-	qmu.RLock()
-	defer qmu.RUnlock()
-	return sortedKeys(qBackends)
-}
+func QueueBackends() []string { return qReg.Keys() }
 
 // StreamBackends returns the names of all registered StreamChannel backends, sorted.
-func StreamBackends() []string {
-	smu.RLock()
-	defer smu.RUnlock()
-	return sortedKeys(sBackends)
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	names := make([]string, 0, len(m))
-	for k := range m {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	return names
-}
+func StreamBackends() []string { return sReg.Keys() }

@@ -142,15 +142,21 @@ func validatePipelineDAG(pipeline []kubeswarmv1alpha1.SwarmTeamPipelineStep) err
 	for _, step := range pipeline {
 		adj[step.Role] = step.DependsOn
 	}
+	return DetectCycle(adj)
+}
+
+// DetectCycle returns an error if the directed graph (adjacency list) contains a cycle.
+// Usable for both pipeline DAG and delegation graph validation.
+func DetectCycle(adj map[string][]string) error {
 	const white, gray, black = 0, 1, 2
-	color := make(map[string]int, len(pipeline))
+	color := make(map[string]int, len(adj))
 	var dfs func(name string) error
 	dfs = func(name string) error {
 		color[name] = gray
 		for _, dep := range adj[name] {
 			switch color[dep] {
 			case gray:
-				return fmt.Errorf("cycle detected: step %q -> %q forms a cycle", name, dep)
+				return fmt.Errorf("cycle detected: %q -> %q forms a cycle", name, dep)
 			case white:
 				if err := dfs(dep); err != nil {
 					return err
@@ -160,9 +166,9 @@ func validatePipelineDAG(pipeline []kubeswarmv1alpha1.SwarmTeamPipelineStep) err
 		color[name] = black
 		return nil
 	}
-	for _, step := range pipeline {
-		if color[step.Role] == white {
-			if err := dfs(step.Role); err != nil {
+	for name := range adj {
+		if color[name] == white {
+			if err := dfs(name); err != nil {
 				return err
 			}
 		}

@@ -22,10 +22,14 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"sync"
 	"text/template"
 
 	kubeswarmv1alpha1 "github.com/kubeswarm/kubeswarm/api/v1alpha1"
 )
+
+// templateCache caches parsed Go templates keyed by template string.
+var templateCache sync.Map // map[string]*template.Template
 
 // InjectionDefenceFragment is appended to the system prompt of every agent pod managed
 // by the operator. It instructs the agent to treat <swarm:step-output> content as
@@ -42,8 +46,9 @@ func IsTruthy(s string) bool {
 }
 
 // ResolveTemplate executes a Go template string against the provided data.
+// Parsed templates are cached for repeated use with different data.
 func ResolveTemplate(tmplStr string, data map[string]any) (string, error) {
-	t, err := template.New("").Option("missingkey=zero").Parse(tmplStr)
+	t, err := getOrParseTemplate(tmplStr)
 	if err != nil {
 		return "", err
 	}
@@ -52,6 +57,19 @@ func ResolveTemplate(tmplStr string, data map[string]any) (string, error) {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+// getOrParseTemplate returns a cached parsed template, parsing and caching on first use.
+func getOrParseTemplate(tmplStr string) (*template.Template, error) {
+	if cached, ok := templateCache.Load(tmplStr); ok {
+		return cached.(*template.Template), nil
+	}
+	t, err := template.New("").Option("missingkey=zero").Parse(tmplStr)
+	if err != nil {
+		return nil, err
+	}
+	templateCache.Store(tmplStr, t)
+	return t, nil
 }
 
 // ResolveTeamPrompt resolves inputs and optional OutputSchema for an SwarmTeam pipeline step.
@@ -177,7 +195,7 @@ func applyPolicyToOutput(
 	compressFn func(model, prompt string) (string, error),
 	defaultModel string,
 ) string {
-	if policy == nil || policy.Strategy == "" || policy.Strategy == "full" {
+	if policy == nil || policy.Strategy == "" || policy.Strategy == ContextStrategyFull {
 		return output
 	}
 	result := ApplyContextPolicy(output, policy, defaultModel)
