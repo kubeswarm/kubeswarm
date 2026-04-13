@@ -32,10 +32,10 @@ package memory
 import (
 	"context"
 	"fmt"
-	"strings"
-	"sync"
 
 	agenterrors "github.com/kubeswarm/kubeswarm/pkg/agent/errors"
+	"github.com/kubeswarm/kubeswarm/pkg/artifacts"
+	"github.com/kubeswarm/kubeswarm/pkg/registry"
 )
 
 // VectorStore is the interface that vector memory backends must satisfy.
@@ -65,18 +65,11 @@ type QueryResult struct {
 // Factory creates a VectorStore from a connection URL.
 type Factory func(url string) (VectorStore, error)
 
-var (
-	mu       sync.RWMutex
-	registry = map[string]Factory{}
-)
+var storeReg registry.Registry[Factory]
 
 // RegisterVectorStore registers a factory for the given URL scheme.
 // Call from an init() function in each backend package.
-func RegisterVectorStore(scheme string, factory Factory) {
-	mu.Lock()
-	defer mu.Unlock()
-	registry[scheme] = factory
-}
+func RegisterVectorStore(scheme string, factory Factory) { storeReg.Register(scheme, factory) }
 
 // NewVectorStore creates a VectorStore from a connection URL.
 // Returns an error if the URL scheme has no registered factory.
@@ -86,21 +79,10 @@ func RegisterVectorStore(scheme string, factory Factory) {
 //	qdrant://qdrant.svc:6334/agent-memories
 //	postgres://pgvector.svc:5432/vectors?table=agent_memories
 func NewVectorStore(url string) (VectorStore, error) {
-	scheme := schemeOf(url)
-	mu.RLock()
-	factory, ok := registry[scheme]
-	mu.RUnlock()
+	scheme := artifacts.SchemeOf(url)
+	factory, ok := storeReg.Lookup(scheme)
 	if !ok {
 		return nil, agenterrors.NewMemoryError(agenterrors.ErrMemoryUnavailable, fmt.Sprintf("no VectorStore registered for scheme %q (url: %s); import the backend package to register it", scheme, url), nil)
 	}
 	return factory(url)
-}
-
-// schemeOf returns the URL scheme (the part before "://").
-// Returns an empty string for URLs without a scheme.
-func schemeOf(url string) string {
-	if before, _, ok := strings.Cut(url, "://"); ok {
-		return before
-	}
-	return ""
 }

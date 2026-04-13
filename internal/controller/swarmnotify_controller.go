@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strconv"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -66,67 +67,34 @@ func (r *SwarmNotifyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		switch ch.Type {
 		case kubeswarmv1alpha1.NotifyChannelWebhook:
 			if ch.Webhook == nil {
-				apimeta.SetStatusCondition(&notify.Status.Conditions, metav1.Condition{
-					Type:               kubeswarmv1alpha1.ConditionReady,
-					Status:             metav1.ConditionFalse,
-					ObservedGeneration: notify.Generation,
-					Reason:             "InvalidChannelConfig",
-					Message:            "channel[" + itoa(i) + "] type=webhook but webhook config is missing",
-				})
+				setCondition(&notify.Status.Conditions, notify.Generation, "", metav1.ConditionFalse, "InvalidChannelConfig",
+					"channel["+strconv.Itoa(i)+"] type=webhook but webhook config is missing")
 				return ctrl.Result{}, r.Status().Update(ctx, notify)
 			}
 			if ch.Webhook.URL == "" && ch.Webhook.URLFrom == nil {
-				apimeta.SetStatusCondition(&notify.Status.Conditions, metav1.Condition{
-					Type:               kubeswarmv1alpha1.ConditionReady,
-					Status:             metav1.ConditionFalse,
-					ObservedGeneration: notify.Generation,
-					Reason:             "InvalidChannelConfig",
-					Message:            "channel[" + itoa(i) + "] webhook requires url or urlFrom",
-				})
+				setCondition(&notify.Status.Conditions, notify.Generation, "", metav1.ConditionFalse, "InvalidChannelConfig",
+					"channel["+strconv.Itoa(i)+"] webhook requires url or urlFrom")
 				return ctrl.Result{}, r.Status().Update(ctx, notify)
 			}
 		case kubeswarmv1alpha1.NotifyChannelSlack:
 			if ch.Slack == nil {
-				apimeta.SetStatusCondition(&notify.Status.Conditions, metav1.Condition{
-					Type:               kubeswarmv1alpha1.ConditionReady,
-					Status:             metav1.ConditionFalse,
-					ObservedGeneration: notify.Generation,
-					Reason:             "InvalidChannelConfig",
-					Message:            "channel[" + itoa(i) + "] type=slack but slack config is missing",
-				})
+				setCondition(&notify.Status.Conditions, notify.Generation, "", metav1.ConditionFalse, "InvalidChannelConfig",
+					"channel["+strconv.Itoa(i)+"] type=slack but slack config is missing")
 				return ctrl.Result{}, r.Status().Update(ctx, notify)
 			}
 		}
 	}
 
-	apimeta.SetStatusCondition(&notify.Status.Conditions, metav1.Condition{
-		Type:               kubeswarmv1alpha1.ConditionReady,
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: notify.Generation,
-		Reason:             "Accepted",
-		Message:            "SwarmNotify policy is valid",
-	})
-	return ctrl.Result{}, r.Status().Update(ctx, notify)
-}
+	// Guard: skip status write when already up-to-date.
+	existingCond := apimeta.FindStatusCondition(notify.Status.Conditions, kubeswarmv1alpha1.ConditionReady)
+	if notify.Status.ObservedGeneration == notify.Generation &&
+		existingCond != nil && existingCond.Status == metav1.ConditionTrue && existingCond.Reason == "Accepted" {
+		return ctrl.Result{}, nil
+	}
 
-// itoa converts an int to its string representation (avoids strconv import).
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	buf := make([]byte, 0, 4)
-	for i > 0 {
-		buf = append([]byte{byte('0' + i%10)}, buf...)
-		i /= 10
-	}
-	if neg {
-		buf = append([]byte{'-'}, buf...)
-	}
-	return string(buf)
+	notify.Status.ObservedGeneration = notify.Generation
+	setCondition(&notify.Status.Conditions, notify.Generation, "", metav1.ConditionTrue, "Accepted", "SwarmNotify policy is valid")
+	return ctrl.Result{}, r.Status().Update(ctx, notify)
 }
 
 // SetupWithManager sets up the controller with the Manager.

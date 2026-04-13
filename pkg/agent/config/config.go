@@ -25,6 +25,14 @@ import (
 	"time"
 
 	agenterrors "github.com/kubeswarm/kubeswarm/pkg/agent/errors"
+	"github.com/kubeswarm/kubeswarm/pkg/audit"
+)
+
+// Reasoning mode constants used by providers to interpret Config.ReasoningMode.
+const (
+	ReasoningModeDisabled = "Disabled"
+	ReasoningModeAuto     = "Auto"
+	ReasoningModeExplicit = "Explicit"
 )
 
 // LoopCompressionConfig mirrors the CRD LoopCompressionConfig for in-loop context compression (RFC-0026).
@@ -219,6 +227,13 @@ type Config struct {
 	// MaxAnswerTokensPerCall is the per-turn answer-token guardrail ceiling.
 	// Set via AGENT_MAX_ANSWER_TOKENS_PER_CALL. 0 when unset (no cap).
 	MaxAnswerTokensPerCall int
+	// ToolDenyPatterns is the merged tool deny list from SwarmPolicy.
+	// Injected by the operator as AGENT_POLICY_TOOL_DENY (JSON array).
+	// Entries are glob patterns matched against tool names at invocation time.
+	ToolDenyPatterns []string
+	// PolicyForceTrustLevel is the minimum trust level forced by SwarmPolicy.
+	// Injected by the operator as AGENT_POLICY_FORCE_TRUST_LEVEL.
+	PolicyForceTrustLevel string
 	// LoopPolicy configures deep-research runtime hooks (RFC-0026).
 	// Injected by the operator as AGENT_LOOP_POLICY (JSON) from spec.runtime.loop.
 	// Nil when the field is unset on the SwarmAgent.
@@ -321,6 +336,8 @@ func Load() (*Config, error) {
 		cfg.DailyTokenLimit = n
 	}
 
+	cfg.PolicyForceTrustLevel = os.Getenv("AGENT_POLICY_FORCE_TRUST_LEVEL")
+
 	return cfg, nil
 }
 
@@ -389,6 +406,11 @@ func applyJSONEnvs(cfg *Config) error {
 			return agenterrors.NewConfigError(agenterrors.ErrConfigInvalid, "invalid AGENT_TEAM_ROUTES JSON", err)
 		}
 	}
+	if raw := os.Getenv("AGENT_POLICY_TOOL_DENY"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &cfg.ToolDenyPatterns); err != nil {
+			return agenterrors.NewConfigError(agenterrors.ErrConfigInvalid, "invalid AGENT_POLICY_TOOL_DENY JSON", err)
+		}
+	}
 	return nil
 }
 
@@ -423,7 +445,7 @@ func parseAuditLog() (*AuditLogConfig, error) {
 	if err := json.Unmarshal([]byte(raw), &al); err != nil {
 		return nil, agenterrors.NewConfigError(agenterrors.ErrConfigInvalid, "invalid AGENT_AUDIT_LOG JSON", err)
 	}
-	if al.Mode == "" || al.Mode == "off" {
+	if al.Mode == "" || al.Mode == string(audit.ModeOff) {
 		return nil, nil
 	}
 	return &al, nil

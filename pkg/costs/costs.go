@@ -26,16 +26,17 @@ package costs
 
 import (
 	"fmt"
-	"sort"
 	"strings"
-	"sync"
+
+	"github.com/kubeswarm/kubeswarm/pkg/registry"
 )
 
 // CostProvider translates token usage into a dollar cost for a given model.
 type CostProvider interface {
 	// Cost returns the dollar cost for the given model and token counts.
+	// thinkingTokens are billed at the output token rate by most providers.
 	// Returns 0.0 for unknown models rather than an error.
-	Cost(model string, inputTokens, outputTokens int64) float64
+	Cost(model string, inputTokens, outputTokens, thinkingTokens int64) float64
 
 	// Currency returns the ISO 4217 currency code (e.g. "USD").
 	Currency() string
@@ -44,18 +45,11 @@ type CostProvider interface {
 // Factory constructs a CostProvider.
 type Factory func() CostProvider
 
-var (
-	mu       sync.RWMutex
-	backends = map[string]Factory{}
-)
+var reg registry.Registry[Factory]
 
 // RegisterCostProvider makes a CostProvider available under the given name.
 // Typically called from an init() function in the implementation package.
-func RegisterCostProvider(name string, f Factory) {
-	mu.Lock()
-	defer mu.Unlock()
-	backends[name] = f
-}
+func RegisterCostProvider(name string, f Factory) { reg.Register(name, f) }
 
 // NewCostProvider returns the named CostProvider, or the "static" default
 // when name is empty. Returns an error only if the name is non-empty and unknown.
@@ -63,9 +57,7 @@ func NewCostProvider(name string) (CostProvider, error) {
 	if name == "" {
 		name = "static"
 	}
-	mu.RLock()
-	f, ok := backends[name]
-	mu.RUnlock()
+	f, ok := reg.Lookup(name)
 	if !ok {
 		return nil, fmt.Errorf("unknown cost provider %q; available: %s", name, strings.Join(Backends(), ", "))
 	}
@@ -80,29 +72,4 @@ func Default() CostProvider {
 }
 
 // Backends returns the sorted names of all registered CostProvider implementations.
-func Backends() []string {
-	mu.RLock()
-	defer mu.RUnlock()
-	names := make([]string, 0, len(backends))
-	for k := range backends {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	return names
-}
-
-// SumStepCosts returns the total cost in USD across all steps that have a CostUSD set.
-// Used by flow/phase.go to accumulate run-level cost.
-func SumStepCosts(steps []StepCost) float64 {
-	var total float64
-	for _, s := range steps {
-		total += s.CostUSD
-	}
-	return total
-}
-
-// StepCost is a minimal struct used to pass step cost data into SumStepCosts
-// without importing the api/v1alpha1 package (avoids import cycles).
-type StepCost struct {
-	CostUSD float64
-}
+func Backends() []string { return reg.Keys() }

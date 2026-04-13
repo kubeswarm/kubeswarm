@@ -81,25 +81,17 @@ func (p *ConfigMapCostProvider) Reload(data map[string]string) error {
 // Cost returns the dollar cost for the given model and token counts.
 // Uses longest-prefix match against the loaded ConfigMap entries.
 // Falls back to the fallback provider if no prefix matches.
-func (p *ConfigMapCostProvider) Cost(model string, inputTokens, outputTokens int64) float64 {
-	lower := strings.ToLower(model)
+func (p *ConfigMapCostProvider) Cost(model string, inputTokens, outputTokens, thinkingTokens int64) float64 {
 	p.mu.RLock()
-	best := cmEntry{}
-	bestLen := -1
-	for _, e := range p.table {
-		if strings.HasPrefix(lower, e.prefix) && len(e.prefix) > bestLen {
-			best = e
-			bestLen = len(e.prefix)
-		}
-	}
+	best, ok := longestPrefixMatch(model, p.table, func(e cmEntry) string { return e.prefix })
 	p.mu.RUnlock()
 
-	if bestLen >= 0 {
+	if ok {
 		return float64(inputTokens)/1_000_000*best.inputPerM +
-			float64(outputTokens)/1_000_000*best.outputPerM
+			float64(outputTokens+thinkingTokens)/1_000_000*best.outputPerM
 	}
 	if p.fallback != nil {
-		return p.fallback.Cost(model, inputTokens, outputTokens)
+		return p.fallback.Cost(model, inputTokens, outputTokens, thinkingTokens)
 	}
 	return 0
 }

@@ -32,9 +32,7 @@ import (
 
 const (
 	// promptWarnBytes is the per-role inline prompt size at which a warning is issued.
-	// Prompts this size can still be applied but the operator will surface a Warning
-	// condition. Users should migrate to systemPromptRef.
-	promptWarnBytes = 50 * 1024 // 50 KB
+	promptWarnBytes = kubeswarmv1alpha1.PromptWarnBytes
 
 	// promptDenyBytes is the per-role inline prompt size at which the request is denied.
 	// A single prompt this large consumes > 1/3 of etcd's default 1.5 MB object budget.

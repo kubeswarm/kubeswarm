@@ -53,6 +53,10 @@ const (
 	delegateTool        = "delegate"
 	collectResultsTool  = "collect_results"
 	spawnAndCollectTool = "spawn_and_collect"
+
+	toolTypeMCP     = "mcp"
+	toolTypeBuiltin = "builtin"
+	toolTypeWebhook = "webhook"
 )
 
 type contextKey int
@@ -73,6 +77,7 @@ type Runner struct {
 	stream         queue.StreamChannel        // nil = token streaming unavailable
 	delegateQueues map[string]queue.TaskQueue // role → queue; nil = not in a team
 	allTools       []mcp.Tool
+	webhookToolMap map[string]config.WebhookToolConfig // keyed by tool name for O(1) lookup
 	metrics        *observability.AgentMetrics
 	metricAttrs    []attribute.KeyValue // namespace/agent/role label set
 	k8sEvents      *observability.AgentEventRecorder
@@ -91,7 +96,11 @@ type Runner struct {
 func New(cfg *config.Config, mcpManager *mcp.Manager, provider providers.LLMProvider, tq queue.TaskQueue, sc queue.StreamChannel, delegateQueues map[string]queue.TaskQueue) *Runner {
 	r := &Runner{cfg: cfg, mcpManager: mcpManager, provider: provider, taskQueue: tq, stream: sc, delegateQueues: delegateQueues}
 	r.buildTools()
-	r.metrics, _ = observability.NewAgentMetrics()
+	r.webhookToolMap = make(map[string]config.WebhookToolConfig, len(cfg.WebhookTools))
+	for _, wt := range cfg.WebhookTools {
+		r.webhookToolMap[wt.Name] = wt
+	}
+	r.metrics = observability.DefaultAgentMetrics()
 	r.metricAttrs = []attribute.KeyValue{
 		attribute.String("namespace", cfg.Namespace),
 		attribute.String("agent", cfg.AgentName),
@@ -201,11 +210,11 @@ func (r *Runner) AllTools() []mcp.Tool {
 // CallTool dispatches a tool invocation to the correct handler.
 // Priority: built-in → webhook → MCP.
 func (r *Runner) CallTool(ctx context.Context, toolName string, input json.RawMessage) (string, error) {
-	toolType := "mcp"
+	toolType := toolTypeMCP
 	if toolName == submitSubtaskTool || toolName == delegateTool || toolName == collectResultsTool || toolName == spawnAndCollectTool {
-		toolType = "builtin"
+		toolType = toolTypeBuiltin
 	} else if r.isWebhookTool(toolName) {
-		toolType = "webhook"
+		toolType = toolTypeWebhook
 	}
 
 	ctx, span := observability.Tracer("swarm-runner").Start(ctx, "kubeswarm.tool.call",
@@ -217,6 +226,29 @@ func (r *Runner) CallTool(ctx context.Context, toolName string, input json.RawMe
 	defer span.End()
 
 	start := time.Now()
+
+	// RFC-0049: enforce policy tool deny list before dispatch.
+	if err := checkToolDenied(toolName, r.cfg.ToolDenyPatterns); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		if r.metrics != nil {
+			r.metrics.RecordToolCall(ctx, start, true,
+				append(r.metricAttrs,
+					attribute.String("tool_name", toolName),
+					attribute.String("tool_type", toolType),
+				)...,
+			)
+		}
+		if r.auditEmitter != nil {
+			taskID, _ := ctx.Value(taskIDKey).(string)
+			evt := r.newTaskAuditEvent(audit.ActionToolDenied, audit.StatusError, taskID)
+			r.applyAuditDetail(&evt, map[string]any{"tool": toolName, "pattern": "denied"})
+			evt.Error = &audit.AuditError{Message: err.Error()}
+			r.auditEmitter.Emit(evt)
+		}
+		return "", err
+	}
+
 	result, err := r.callToolInner(ctx, toolName, input)
 	durationMs := time.Since(start).Milliseconds()
 	if err != nil {
@@ -241,12 +273,8 @@ func (r *Runner) CallTool(ctx context.Context, toolName string, input json.RawMe
 		if err != nil {
 			status = audit.StatusError
 		}
-		evt := audit.NewEvent(audit.ActionToolCalled, status, r.cfg.Namespace, r.cfg.AgentName)
-		evt.Team = r.cfg.TeamName
 		taskID, _ := ctx.Value(taskIDKey).(string)
-		evt.TaskID = taskID
-		evt.Model = r.cfg.Model
-		evt.Provider = r.cfg.Provider
+		evt := r.newTaskAuditEvent(audit.ActionToolCalled, status, taskID)
 		detail := map[string]any{
 			"tool":       toolName,
 			"toolType":   toolType,
@@ -269,12 +297,8 @@ func (r *Runner) CallTool(ctx context.Context, toolName string, input json.RawMe
 }
 
 func (r *Runner) isWebhookTool(name string) bool {
-	for _, wt := range r.cfg.WebhookTools {
-		if wt.Name == name {
-			return true
-		}
-	}
-	return false
+	_, ok := r.webhookToolMap[name]
+	return ok
 }
 
 func (r *Runner) callToolInner(ctx context.Context, toolName string, input json.RawMessage) (string, error) {
@@ -313,11 +337,7 @@ func (r *Runner) callToolInner(ctx context.Context, toolName string, input json.
 		}
 		dq, ok := r.delegateQueues[args.Role]
 		if !ok {
-			available := make([]string, 0, len(r.delegateQueues))
-			for role := range r.delegateQueues {
-				available = append(available, role)
-			}
-			return "", agenterrors.NewToolError(agenterrors.ErrToolNotFound, fmt.Sprintf("delegate: unknown role %q; available: %s", args.Role, strings.Join(available, ", ")), nil)
+			return "", agenterrors.NewToolError(agenterrors.ErrToolNotFound, fmt.Sprintf("delegate: unknown role %q; available: %s", args.Role, strings.Join(r.availableRoles(), ", ")), nil)
 		}
 		ctx, delegateSpan := observability.Tracer("swarm-runner").Start(ctx, "kubeswarm.delegate",
 			oteltrace.WithAttributes(
@@ -336,10 +356,8 @@ func (r *Runner) callToolInner(ctx context.Context, toolName string, input json.
 		}
 		// Audit: delegate.sent (RFC-0030).
 		if r.auditEmitter != nil {
-			evt := audit.NewEvent(audit.ActionDelegateSent, audit.StatusSuccess, r.cfg.Namespace, r.cfg.AgentName)
-			evt.Team = r.cfg.TeamName
 			parentTaskID, _ := ctx.Value(taskIDKey).(string)
-			evt.TaskID = parentTaskID
+			evt := r.newTaskAuditEvent(audit.ActionDelegateSent, audit.StatusSuccess, parentTaskID)
 			detail := map[string]any{
 				"fromRole":    r.cfg.TeamRole,
 				"toRole":      args.Role,
@@ -376,10 +394,8 @@ func (r *Runner) callToolInner(ctx context.Context, toolName string, input json.
 	}
 
 	// Inline webhook tools.
-	for _, wt := range r.cfg.WebhookTools {
-		if wt.Name == toolName {
-			return callWebhook(ctx, wt, input)
-		}
+	if wt, ok := r.webhookToolMap[toolName]; ok {
+		return callWebhook(ctx, wt, input)
 	}
 
 	// Fall through to MCP tools.
@@ -398,12 +414,8 @@ func (r *Runner) RunTask(ctx context.Context, task queue.Task) (string, queue.To
 
 	// Audit: task.received (RFC-0030).
 	if r.auditEmitter != nil {
-		evt := audit.NewEvent(audit.ActionTaskReceived, audit.StatusSuccess, r.cfg.Namespace, r.cfg.AgentName)
-		evt.Team = r.cfg.TeamName
-		evt.TaskID = task.ID
+		evt := r.newTaskAuditEvent(audit.ActionTaskReceived, audit.StatusSuccess, task.ID)
 		evt.RunID = task.Meta["run_name"]
-		evt.Model = r.cfg.Model
-		evt.Provider = r.cfg.Provider
 		r.auditEmitter.Emit(evt)
 	}
 
@@ -467,29 +479,20 @@ func (r *Runner) RunTask(ctx context.Context, task queue.Task) (string, queue.To
 	if r.auditEmitter != nil {
 		taskDurationMs := time.Since(llmStart).Milliseconds()
 		if err != nil {
-			evt := audit.NewEvent(audit.ActionTaskFailed, audit.StatusError, r.cfg.Namespace, r.cfg.AgentName)
-			evt.Team = r.cfg.TeamName
-			evt.TaskID = task.ID
+			evt := r.newTaskAuditEvent(audit.ActionTaskFailed, audit.StatusError, task.ID)
 			evt.RunID = task.Meta["run_name"]
-			evt.Model = r.cfg.Model
-			evt.Provider = r.cfg.Provider
 			evt.Error = &audit.AuditError{Message: err.Error()}
 			evt.Timing = &audit.Timing{ExecutionMs: taskDurationMs}
 			r.auditEmitter.Emit(evt)
 		} else {
-			evt := audit.NewEvent(audit.ActionTaskCompleted, audit.StatusSuccess, r.cfg.Namespace, r.cfg.AgentName)
-			evt.Team = r.cfg.TeamName
-			evt.TaskID = task.ID
+			evt := r.newTaskAuditEvent(audit.ActionTaskCompleted, audit.StatusSuccess, task.ID)
 			evt.RunID = task.Meta["run_name"]
-			evt.Model = r.cfg.Model
-			evt.Provider = r.cfg.Provider
 			evt.Tokens = &audit.TokenUsage{Input: usage.InputTokens, Output: usage.OutputTokens}
 			evt.Timing = &audit.Timing{ExecutionMs: taskDurationMs}
-			detail := map[string]any{
+			r.applyAuditDetail(&evt, map[string]any{
 				"outputLength":    len(result),
 				"totalDurationMs": taskDurationMs,
-			}
-			r.applyAuditDetail(&evt, detail)
+			})
 			r.auditEmitter.Emit(evt)
 		}
 	}
@@ -572,11 +575,7 @@ func (r *Runner) handleSpawnAndCollect(ctx context.Context, input json.RawMessag
 		if task.Role != "" {
 			dq, ok := r.delegateQueues[task.Role]
 			if !ok {
-				available := make([]string, 0, len(r.delegateQueues))
-				for role := range r.delegateQueues {
-					available = append(available, role)
-				}
-				return "", agenterrors.NewToolError(agenterrors.ErrToolNotFound, fmt.Sprintf("spawn_and_collect: unknown role %q; available: %s", task.Role, strings.Join(available, ", ")), nil)
+				return "", agenterrors.NewToolError(agenterrors.ErrToolNotFound, fmt.Sprintf("spawn_and_collect: unknown role %q; available: %s", task.Role, strings.Join(r.availableRoles(), ", ")), nil)
 			}
 			tq = dq
 		} else {
@@ -771,6 +770,25 @@ func callWebhook(ctx context.Context, wt config.WebhookToolConfig, input json.Ra
 	}
 	log.Printf("webhook tool %q: called successfully, status=%d", wt.Name, resp.StatusCode)
 	return string(body), nil
+}
+
+// availableRoles returns a sorted list of configured delegate role names.
+func (r *Runner) availableRoles() []string {
+	roles := make([]string, 0, len(r.delegateQueues))
+	for role := range r.delegateQueues {
+		roles = append(roles, role)
+	}
+	return roles
+}
+
+// newTaskAuditEvent creates an AuditEvent pre-filled with the runner's common fields.
+func (r *Runner) newTaskAuditEvent(action audit.Action, status audit.Status, taskID string) audit.AuditEvent {
+	evt := audit.NewEvent(action, status, r.cfg.Namespace, r.cfg.AgentName)
+	evt.Team = r.cfg.TeamName
+	evt.TaskID = taskID
+	evt.Model = r.cfg.Model
+	evt.Provider = r.cfg.Provider
+	return evt
 }
 
 // applyAuditDetail applies redaction, truncation, and JSON marshalling to a detail

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -56,6 +57,10 @@ type SwarmTeamReconciler struct {
 	AgentTaskQueueURL string // Redis URL injected into agent pods (may differ when operator runs outside cluster)
 	TaskQueue         queue.TaskQueue
 	Recorder          events.EventRecorder
+
+	// pssEnsured tracks namespaces where ensureNamespacePSS has already succeeded,
+	// avoiding a server-side apply on every reconcile for the common steady-state path.
+	pssEnsured sync.Map // map[string]struct{}
 }
 
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmteams,verbs=get;list;watch;create;update;patch;delete
@@ -103,6 +108,11 @@ func (r *SwarmTeamReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 // standard - which all swarm-managed pods already comply with.
 // This is a best-effort patch; failure does not block team reconciliation.
 func (r *SwarmTeamReconciler) ensureNamespacePSS(ctx context.Context, namespace string) error {
+	// Fast path: already applied for this namespace.
+	if _, ok := r.pssEnsured.Load(namespace); ok {
+		return nil
+	}
+
 	// Server-side apply: no Get needed, no cache dependency.
 	// Only requires patch permission on namespaces.
 	nsApply := corev1ac.Namespace(namespace).WithLabels(map[string]string{
@@ -112,7 +122,11 @@ func (r *SwarmTeamReconciler) ensureNamespacePSS(ctx context.Context, namespace 
 		"pod-security.kubernetes.io/warn-version":    "latest",
 	})
 	force := true
-	return r.Apply(ctx, nsApply, &client.ApplyOptions{FieldManager: "kubeswarm", Force: &force})
+	if err := r.Apply(ctx, nsApply, &client.ApplyOptions{FieldManager: "kubeswarm", Force: &force}); err != nil {
+		return err
+	}
+	r.pssEnsured.Store(namespace, struct{}{})
+	return nil
 }
 
 // reconcileDynamicMode handles SwarmTeam in dynamic mode (no pipeline).
@@ -131,7 +145,7 @@ func (r *SwarmTeamReconciler) reconcileDynamicMode(ctx context.Context, team *ku
 	// 1. Validate topology.
 	if err := r.validateTopology(team); err != nil {
 		logger.Error(err, "invalid team topology")
-		r.setCondition(team, metav1.ConditionFalse, "InvalidTopology", err.Error())
+		setCondition(&team.Status.Conditions, team.Generation, "", metav1.ConditionFalse, "InvalidTopology", err.Error())
 		_ = r.Status().Update(ctx, team)
 		if r.Recorder != nil {
 			r.Recorder.Eventf(team, nil, corev1.EventTypeWarning, "TopologyInvalid", "Reconcile", "%s", err.Error())
@@ -143,7 +157,7 @@ func (r *SwarmTeamReconciler) reconcileDynamicMode(ctx context.Context, team *ku
 	roleStatuses, entryRoleName, err := r.reconcileRoles(ctx, team)
 	if err != nil {
 		logger.Error(err, "failed to reconcile team roles")
-		r.setCondition(team, metav1.ConditionFalse, "ReconcileError", err.Error())
+		setCondition(&team.Status.Conditions, team.Generation, "", metav1.ConditionFalse, "ReconcileError", err.Error())
 		_ = r.Status().Update(ctx, team)
 		return ctrl.Result{}, err
 	}
@@ -155,7 +169,7 @@ func (r *SwarmTeamReconciler) reconcileDynamicMode(ctx context.Context, team *ku
 	team.Status.ObservedGeneration = team.Generation
 	r.setPromptSizeWarning(team)
 	msg := fmt.Sprintf("team %q ready with %d roles", team.Name, len(team.Spec.Roles))
-	r.setCondition(team, metav1.ConditionTrue, "Reconciled", msg)
+	setCondition(&team.Status.Conditions, team.Generation, "", metav1.ConditionTrue, "Reconciled", msg)
 	if r.Recorder != nil {
 		r.Recorder.Eventf(team, nil, corev1.EventTypeNormal, "TeamReconciled", "Reconcile", "%s", msg)
 	}
@@ -171,7 +185,7 @@ func (r *SwarmTeamReconciler) reconcilePipelineInfra(ctx context.Context, team *
 
 	if err := flow.ValidateTeamDAG(team); err != nil {
 		logger.Error(err, "invalid pipeline DAG")
-		flow.SetTeamCondition(team, metav1.ConditionFalse, "InvalidDAG", err.Error())
+		setCondition(&team.Status.Conditions, team.Generation, "", metav1.ConditionFalse, "InvalidDAG", err.Error())
 		_ = r.Status().Update(ctx, team)
 		return ctrl.Result{}, nil
 	}
@@ -179,7 +193,7 @@ func (r *SwarmTeamReconciler) reconcilePipelineInfra(ctx context.Context, team *
 	roleStatuses, _, err := r.reconcileRoles(ctx, team)
 	if err != nil {
 		logger.Error(err, "failed to reconcile pipeline roles")
-		flow.SetTeamCondition(team, metav1.ConditionFalse, "RolesNotReady", err.Error())
+		setCondition(&team.Status.Conditions, team.Generation, "", metav1.ConditionFalse, "RolesNotReady", err.Error())
 		_ = r.Status().Update(ctx, team)
 		return ctrl.Result{}, err
 	}
@@ -189,7 +203,7 @@ func (r *SwarmTeamReconciler) reconcilePipelineInfra(ctx context.Context, team *
 	var runs kubeswarmv1alpha1.SwarmRunList
 	if err := r.List(ctx, &runs,
 		client.InNamespace(team.Namespace),
-		client.MatchingLabels{"kubeswarm/team": team.Name},
+		client.MatchingLabels{kubeswarmv1alpha1.LabelTeam: team.Name},
 	); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -205,34 +219,11 @@ func (r *SwarmTeamReconciler) reconcilePipelineInfra(ctx context.Context, team *
 		logger.Error(asErr, "autoscaling reconcile failed - continuing")
 	}
 
-	var latestRun *kubeswarmv1alpha1.SwarmRun
-	for i := range runs.Items {
-		run := &runs.Items[i]
-		if latestRun == nil || run.CreationTimestamp.After(latestRun.CreationTimestamp.Time) {
-			latestRun = run
-		}
-	}
-
 	team.Status.Roles = roleStatuses
 	team.Status.ObservedGeneration = team.Generation
-	if latestRun != nil {
-		team.Status.LastRunName = latestRun.Name
-		team.Status.LastRunPhase = latestRun.Status.Phase
-		switch latestRun.Status.Phase {
-		case kubeswarmv1alpha1.SwarmRunPhaseRunning:
-			team.Status.Phase = kubeswarmv1alpha1.SwarmTeamPhaseRunning
-		case kubeswarmv1alpha1.SwarmRunPhaseSucceeded:
-			team.Status.Phase = kubeswarmv1alpha1.SwarmTeamPhaseSucceeded
-		case kubeswarmv1alpha1.SwarmRunPhaseFailed:
-			team.Status.Phase = kubeswarmv1alpha1.SwarmTeamPhaseFailed
-		default:
-			team.Status.Phase = kubeswarmv1alpha1.SwarmTeamPhaseReady
-		}
-	} else {
-		team.Status.Phase = kubeswarmv1alpha1.SwarmTeamPhaseReady
-	}
+	mirrorRunPhaseToTeam(team, latestRunFromList(runs.Items))
 
-	flow.SetTeamCondition(team, metav1.ConditionTrue, "Reconciled",
+	setCondition(&team.Status.Conditions, team.Generation, "", metav1.ConditionTrue, "Reconciled",
 		fmt.Sprintf("pipeline team %q ready with %d roles", team.Name, len(team.Spec.Roles)))
 	if err := r.Status().Update(ctx, team); err != nil {
 		return ctrl.Result{}, err
@@ -250,7 +241,7 @@ func (r *SwarmTeamReconciler) reconcileRoutedInfra(ctx context.Context, team *ku
 	var runs kubeswarmv1alpha1.SwarmRunList
 	if err := r.List(ctx, &runs,
 		client.InNamespace(team.Namespace),
-		client.MatchingLabels{"kubeswarm/team": team.Name},
+		client.MatchingLabels{kubeswarmv1alpha1.LabelTeam: team.Name},
 	); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -259,34 +250,11 @@ func (r *SwarmTeamReconciler) reconcileRoutedInfra(ctx context.Context, team *ku
 		logger.Error(err, "pruning old SwarmRuns for routed team")
 	}
 
-	var latestRun *kubeswarmv1alpha1.SwarmRun
-	for i := range runs.Items {
-		run := &runs.Items[i]
-		if latestRun == nil || run.CreationTimestamp.After(latestRun.CreationTimestamp.Time) {
-			latestRun = run
-		}
-	}
-
 	team.Status.Roles = nil // no managed roles in routed mode
 	team.Status.ObservedGeneration = team.Generation
-	if latestRun != nil {
-		team.Status.LastRunName = latestRun.Name
-		team.Status.LastRunPhase = latestRun.Status.Phase
-		switch latestRun.Status.Phase {
-		case kubeswarmv1alpha1.SwarmRunPhaseRunning:
-			team.Status.Phase = kubeswarmv1alpha1.SwarmTeamPhaseRunning
-		case kubeswarmv1alpha1.SwarmRunPhaseSucceeded:
-			team.Status.Phase = kubeswarmv1alpha1.SwarmTeamPhaseSucceeded
-		case kubeswarmv1alpha1.SwarmRunPhaseFailed:
-			team.Status.Phase = kubeswarmv1alpha1.SwarmTeamPhaseFailed
-		default:
-			team.Status.Phase = kubeswarmv1alpha1.SwarmTeamPhaseReady
-		}
-	} else {
-		team.Status.Phase = kubeswarmv1alpha1.SwarmTeamPhaseReady
-	}
+	mirrorRunPhaseToTeam(team, latestRunFromList(runs.Items))
 
-	flow.SetTeamCondition(team, metav1.ConditionTrue, "Reconciled",
+	setCondition(&team.Status.Conditions, team.Generation, "", metav1.ConditionTrue, "Reconciled",
 		fmt.Sprintf("routed team %q ready", team.Name))
 	return ctrl.Result{}, r.Status().Update(ctx, team)
 }
@@ -326,30 +294,8 @@ func (r *SwarmTeamReconciler) validateTopology(team *kubeswarmv1alpha1.SwarmTeam
 	for _, role := range team.Spec.Roles {
 		adjacency[role.Name] = role.CanDelegate
 	}
-	visited := make(map[string]bool)
-	inStack := make(map[string]bool)
-	var dfs func(role string) bool
-	dfs = func(role string) bool {
-		visited[role] = true
-		inStack[role] = true
-		for _, next := range adjacency[role] {
-			if !visited[next] {
-				if dfs(next) {
-					return true
-				}
-			} else if inStack[next] {
-				return true
-			}
-		}
-		inStack[role] = false
-		return false
-	}
-	for _, role := range team.Spec.Roles {
-		if !visited[role.Name] {
-			if dfs(role.Name) {
-				return fmt.Errorf("delegation graph contains a cycle")
-			}
-		}
+	if err := flow.DetectCycle(adjacency); err != nil {
+		return fmt.Errorf("delegation graph contains a cycle")
 	}
 
 	return nil
@@ -398,23 +344,39 @@ func (r *SwarmTeamReconciler) reconcileRoles(
 			return nil, "", fmt.Errorf("marshalling routes for role %q: %w", role.Name, err)
 		}
 
-		patch := client.MergeFrom(agent.DeepCopy())
-		if agent.Annotations == nil {
-			agent.Annotations = make(map[string]string)
-		}
-		agent.Annotations[annotationTeamQueueURL] = roleQueueURL[role.Name]
-		agent.Annotations[annotationTeamRoutes] = string(routesJSON)
-		agent.Annotations[annotationTeamRole] = role.Name
-		// Propagate artifact store info (RFC-0013) so the agent controller can inject
-		// AGENT_ARTIFACT_STORE_URL and mount the PVC without re-reading the team spec.
-		if storeURL := artifactStoreURL(team.Spec.ArtifactStore); storeURL != "" {
-			agent.Annotations[annotationTeamArtifactStore] = storeURL
-		}
-		if claimName := artifactStoreClaim(team.Spec.ArtifactStore); claimName != "" {
-			agent.Annotations[annotationTeamArtifactClaim] = claimName
-		}
-		if err := r.Patch(ctx, agent, patch); err != nil {
-			return nil, "", fmt.Errorf("patching SwarmAgent %q: %w", agentName, err)
+		wantStoreURL := artifactStoreURL(team.Spec.ArtifactStore)
+		wantClaimName := artifactStoreClaim(team.Spec.ArtifactStore)
+		wantCredSecret := artifactStoreCredentials(team.Spec.ArtifactStore)
+		ann := agent.Annotations
+		if ann == nil ||
+			ann[kubeswarmv1alpha1.AnnotationTeamQueueURL] != roleQueueURL[role.Name] ||
+			ann[kubeswarmv1alpha1.AnnotationTeamRoutes] != string(routesJSON) ||
+			ann[kubeswarmv1alpha1.AnnotationTeamRole] != role.Name ||
+			ann[kubeswarmv1alpha1.AnnotationTeamArtifactStore] != wantStoreURL ||
+			ann[kubeswarmv1alpha1.AnnotationTeamArtifactClaim] != wantClaimName ||
+			ann[kubeswarmv1alpha1.AnnotationTeamArtifactCredentials] != wantCredSecret {
+			patch := client.MergeFrom(agent.DeepCopy())
+			if agent.Annotations == nil {
+				agent.Annotations = make(map[string]string)
+			}
+			agent.Annotations[kubeswarmv1alpha1.AnnotationTeamQueueURL] = roleQueueURL[role.Name]
+			agent.Annotations[kubeswarmv1alpha1.AnnotationTeamRoutes] = string(routesJSON)
+			agent.Annotations[kubeswarmv1alpha1.AnnotationTeamRole] = role.Name
+			// Propagate artifact store info (RFC-0013) so the agent controller can inject
+			// AGENT_ARTIFACT_STORE_URL, mount the PVC, and inject credentials without
+			// re-reading the team spec.
+			if wantStoreURL != "" {
+				agent.Annotations[kubeswarmv1alpha1.AnnotationTeamArtifactStore] = wantStoreURL
+			}
+			if wantClaimName != "" {
+				agent.Annotations[kubeswarmv1alpha1.AnnotationTeamArtifactClaim] = wantClaimName
+			}
+			if wantCredSecret != "" {
+				agent.Annotations[kubeswarmv1alpha1.AnnotationTeamArtifactCredentials] = wantCredSecret
+			}
+			if err := r.Patch(ctx, agent, patch); err != nil {
+				return nil, "", fmt.Errorf("patching SwarmAgent %q: %w", agentName, err)
+			}
 		}
 
 		managedName := ""
@@ -468,8 +430,8 @@ func (r *SwarmTeamReconciler) reconcileRoleAgent(
 			Name:      agentName,
 			Namespace: team.Namespace,
 			Labels: map[string]string{
-				"kubeswarm/team": team.Name,
-				"kubeswarm/role": role.Name,
+				kubeswarmv1alpha1.LabelTeam: team.Name,
+				kubeswarmv1alpha1.LabelRole: role.Name,
 			},
 		},
 		Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -540,12 +502,20 @@ func (r *SwarmTeamReconciler) reconcileRoleAgent(
 	}
 	// Update spec in case role definition changed.
 	// Preserve spec.runtime.replicas when team autoscaling is enabled - the autoscaler owns replica count.
-	patch := client.MergeFrom(existing.DeepCopy())
 	preservedReplicas := existing.Spec.Runtime.Replicas
-	existing.Spec = desired.Spec
+	newSpec := desired.Spec
 	if team.Spec.Autoscaling != nil && team.Spec.Autoscaling.Enabled {
-		existing.Spec.Runtime.Replicas = preservedReplicas
+		newSpec.Runtime.Replicas = preservedReplicas
 	}
+	// Skip write when spec is unchanged to avoid triggering a SwarmAgent re-reconcile.
+	// JSON-marshal comparison avoids non-deterministic map ordering in reflect.DeepEqual.
+	existingJSON, _ := json.Marshal(existing.Spec)
+	newJSON, _ := json.Marshal(newSpec)
+	if string(existingJSON) == string(newJSON) {
+		return agentName, nil
+	}
+	patch := client.MergeFrom(existing.DeepCopy())
+	existing.Spec = newSpec
 	return agentName, r.Patch(ctx, existing, patch)
 }
 
@@ -561,14 +531,7 @@ func (r *SwarmTeamReconciler) roleQueueURL(team *kubeswarmv1alpha1.SwarmTeam, ro
 		return ""
 	}
 	streamName := fmt.Sprintf("%s.%s.%s", team.Namespace, team.Name, role)
-	u, err := url.Parse(base)
-	if err != nil {
-		return base
-	}
-	q := u.Query()
-	q.Set("stream", streamName)
-	u.RawQuery = q.Encode()
-	return u.String()
+	return appendStreamParam(base, streamName)
 }
 
 // artifactStoreURL converts an ArtifactStoreSpec to the URL string injected as
@@ -594,21 +557,15 @@ func artifactStoreURL(spec *kubeswarmv1alpha1.ArtifactStoreSpec) string {
 			Host:   spec.S3.Bucket,
 			Path:   "/" + spec.S3.Prefix,
 		}
+		q := u.Query()
 		if spec.S3.Region != "" {
-			q := u.Query()
 			q.Set("region", spec.S3.Region)
-			u.RawQuery = q.Encode()
 		}
+		if spec.S3.Endpoint != "" {
+			q.Set("endpoint", spec.S3.Endpoint)
+		}
+		u.RawQuery = q.Encode()
 		return u.String()
-	case kubeswarmv1alpha1.ArtifactStoreGCS:
-		if spec.GCS == nil || spec.GCS.Bucket == "" {
-			return ""
-		}
-		return (&url.URL{
-			Scheme: "gcs",
-			Host:   spec.GCS.Bucket,
-			Path:   "/" + spec.GCS.Prefix,
-		}).String()
 	}
 	return ""
 }
@@ -622,6 +579,18 @@ func artifactStoreClaim(spec *kubeswarmv1alpha1.ArtifactStoreSpec) string {
 		return ""
 	}
 	return spec.Local.ClaimName
+}
+
+// artifactStoreCredentials returns the Secret name containing cloud credentials for the
+// artifact store, or empty string when using the default credential chain.
+func artifactStoreCredentials(spec *kubeswarmv1alpha1.ArtifactStoreSpec) string {
+	if spec == nil {
+		return ""
+	}
+	if spec.Type == kubeswarmv1alpha1.ArtifactStoreS3 && spec.S3 != nil && spec.S3.CredentialsSecret != nil {
+		return spec.S3.CredentialsSecret.Name
+	}
+	return ""
 }
 
 const swarmEventTargetTeamIndex = ".spec.targets.team"
@@ -650,45 +619,25 @@ func (r *SwarmTeamReconciler) isTriggerTemplate(ctx context.Context, team *kubes
 	return false, nil
 }
 
-func (r *SwarmTeamReconciler) setCondition(
-	team *kubeswarmv1alpha1.SwarmTeam,
-	status metav1.ConditionStatus,
-	reason, message string,
-) {
-	apimeta.SetStatusCondition(&team.Status.Conditions, metav1.Condition{
-		Type:               kubeswarmv1alpha1.ConditionReady,
-		Status:             status,
-		ObservedGeneration: team.Generation,
-		Reason:             reason,
-		Message:            message,
-	})
-}
-
 // setPromptSizeWarning sets or clears the SystemPromptSizeWarning condition based on the
 // total size of inline prompts across all roles. A warning is surfaced when the
 // combined inline prompt bytes exceed 50 KB. Users should migrate to prompt.from to
 // avoid approaching etcd's per-object size limit.
 func (r *SwarmTeamReconciler) setPromptSizeWarning(team *kubeswarmv1alpha1.SwarmTeam) {
-	const warnBytes = 50 * 1024 // 50 KB - mirrors webhook.promptWarnBytes
 	var totalBytes int
 	for _, role := range team.Spec.Roles {
 		if role.Prompt != nil {
 			totalBytes += len(role.Prompt.Inline)
 		}
 	}
-	if totalBytes > warnBytes {
-		apimeta.SetStatusCondition(&team.Status.Conditions, metav1.Condition{
-			Type:               "SystemPromptSizeWarning",
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: team.Generation,
-			Reason:             "InlinePromptTooLarge",
-			Message: fmt.Sprintf(
+	if totalBytes > kubeswarmv1alpha1.PromptWarnBytes {
+		setCondition(&team.Status.Conditions, team.Generation, "SystemPromptSizeWarning", metav1.ConditionTrue, "InlinePromptTooLarge",
+			fmt.Sprintf(
 				"total inline prompt size is %d KB (> 50 KB). "+
 					"Move prompts to ConfigMaps and reference them via spec.roles[*].prompt.from.configMapKeyRef "+
 					"to avoid etcd object size limits.",
 				totalBytes/1024,
-			),
-		})
+			))
 	} else {
 		apimeta.RemoveStatusCondition(&team.Status.Conditions, "SystemPromptSizeWarning")
 	}
@@ -914,15 +863,18 @@ func (r *SwarmTeamReconciler) applyRoleScale(
 		}
 	}
 
-	// Refresh after potential spec patch so status patch uses the latest resourceVersion.
+	// Update status.desiredReplicas if changed. Re-read after spec patch to get fresh resourceVersion.
 	if agent.Status.DesiredReplicas == nil || *agent.Status.DesiredReplicas != desired {
-		fresh := &kubeswarmv1alpha1.SwarmAgent{}
-		if err := r.Get(ctx, client.ObjectKey{Name: agentName, Namespace: team.Namespace}, fresh); err == nil {
-			statusPatch := client.MergeFrom(fresh.DeepCopy())
-			fresh.Status.DesiredReplicas = &desired
-			if err := r.Status().Patch(ctx, fresh, statusPatch); err != nil {
-				logger.Error(err, "updating SwarmAgent status.desiredReplicas", "agent", agentName)
+		if currentReplicas != desired {
+			// Spec was patched above - need fresh resourceVersion for the status patch.
+			if err := r.Get(ctx, client.ObjectKey{Name: agentName, Namespace: team.Namespace}, agent); err != nil {
+				return nil
 			}
+		}
+		statusPatch := client.MergeFrom(agent.DeepCopy())
+		agent.Status.DesiredReplicas = &desired
+		if err := r.Status().Patch(ctx, agent, statusPatch); err != nil {
+			logger.Error(err, "updating SwarmAgent status.desiredReplicas", "agent", agentName)
 		}
 	}
 	return nil
@@ -969,7 +921,7 @@ func (r *SwarmTeamReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Requeue the team when one of its SwarmRuns changes phase (so LastRunName/LastRunPhase mirror updates quickly).
 		Watches(&kubeswarmv1alpha1.SwarmRun{}, handler.EnqueueRequestsFromMapFunc(
 			func(_ context.Context, obj client.Object) []reconcile.Request {
-				teamName := obj.GetLabels()["kubeswarm/team"]
+				teamName := obj.GetLabels()[kubeswarmv1alpha1.LabelTeam]
 				if teamName == "" {
 					return nil
 				}

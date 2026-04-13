@@ -29,16 +29,19 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/kubeswarm/kubeswarm/pkg/agent/config"
 	agenterrors "github.com/kubeswarm/kubeswarm/pkg/agent/errors"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/mcp"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/queue"
+	"github.com/kubeswarm/kubeswarm/pkg/registry"
 )
 
 // ErrEmbeddingNotSupported is returned by LLMProvider.Embed when the provider
 // does not expose an embeddings API (e.g. Anthropic).
+// ProviderOpenAI is the registered name for OpenAI-compatible backends (including Ollama).
+const ProviderOpenAI = "openai"
+
 var ErrEmbeddingNotSupported = errors.New("provider does not support embeddings")
 
 // LLMProvider is the interface every LLM backend must implement.
@@ -126,18 +129,11 @@ func Complete(ctx context.Context, model, systemPrompt, userMsg string, maxToken
 	return c.Complete(ctx, model, systemPrompt, userMsg, maxTokens)
 }
 
-var (
-	mu       sync.RWMutex
-	registry = map[string]func() LLMProvider{}
-)
+var providerReg registry.Registry[func() LLMProvider]
 
 // Register adds a provider factory to the registry under the given name.
 // Call this from an init() function in each provider package.
-func Register(name string, factory func() LLMProvider) {
-	mu.Lock()
-	defer mu.Unlock()
-	registry[name] = factory
-}
+func Register(name string, factory func() LLMProvider) { providerReg.Register(name, factory) }
 
 // New returns the LLMProvider for the given name.
 // Callers should use Detect(model) to resolve the provider name when AGENT_PROVIDER is unset.
@@ -149,9 +145,7 @@ func New(name string) (LLMProvider, error) {
 			nil,
 		)
 	}
-	mu.RLock()
-	factory, ok := registry[name]
-	mu.RUnlock()
+	factory, ok := providerReg.Lookup(name)
 	if !ok {
 		return nil, agenterrors.NewConfigError(
 			agenterrors.ErrConfigInvalid,
@@ -179,10 +173,26 @@ func Detect(model string) string {
 		strings.HasPrefix(model, "o1"),
 		strings.HasPrefix(model, "o3"),
 		strings.HasPrefix(model, "o4"):
-		return "openai"
+		return ProviderOpenAI
 	case strings.HasPrefix(model, "gemini-"):
 		return "gemini"
 	default:
-		return "openai"
+		return ProviderOpenAI
+	}
+}
+
+// DetectEmbedding returns the provider name inferred from an embedding model ID.
+// Falls back to "openai" for OpenAI-compatible endpoints (e.g. Ollama).
+func DetectEmbedding(model string) string {
+	switch {
+	case strings.HasPrefix(model, "text-embedding-"):
+		return ProviderOpenAI
+	case strings.HasPrefix(model, "text-multilingual-embedding-"),
+		strings.HasPrefix(model, "text-embedding-004"):
+		return "google"
+	case strings.HasPrefix(model, "voyage-"):
+		return "voyageai"
+	default:
+		return ProviderOpenAI
 	}
 }

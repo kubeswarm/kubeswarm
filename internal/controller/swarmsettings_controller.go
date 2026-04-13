@@ -20,7 +20,6 @@ import (
 	"context"
 
 	"k8s.io/apimachinery/pkg/api/errors"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -55,14 +54,17 @@ func (r *SwarmSettingsReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
+	// Short-circuit: no write needed when the status already reflects the current generation.
+	if swarmSettings.Status.ObservedGeneration == swarmSettings.Generation {
+		for _, c := range swarmSettings.Status.Conditions {
+			if c.Type == kubeswarmv1alpha1.ConditionReady && c.Status == metav1.ConditionTrue {
+				return ctrl.Result{}, nil
+			}
+		}
+	}
+
 	swarmSettings.Status.ObservedGeneration = swarmSettings.Generation
-	apimeta.SetStatusCondition(&swarmSettings.Status.Conditions, metav1.Condition{
-		Type:               kubeswarmv1alpha1.ConditionReady,
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: swarmSettings.Generation,
-		Reason:             "Accepted",
-		Message:            "SwarmSettings is valid and available",
-	})
+	setCondition(&swarmSettings.Status.Conditions, swarmSettings.Generation, "", metav1.ConditionTrue, "Accepted", "SwarmSettings is valid and available")
 
 	return ctrl.Result{}, r.Status().Update(ctx, swarmSettings)
 }

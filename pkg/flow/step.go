@@ -22,29 +22,18 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
-	"github.com/tidwall/gjson"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	kubeswarmv1alpha1 "github.com/kubeswarm/kubeswarm/api/v1alpha1"
 )
 
-// SetTeamCondition updates the "Ready" condition on an SwarmTeam status.
-func SetTeamCondition(f *kubeswarmv1alpha1.SwarmTeam, status metav1.ConditionStatus, reason, message string) {
-	apimeta.SetStatusCondition(&f.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             status,
-		ObservedGeneration: f.Generation,
-		Reason:             reason,
-		Message:            message,
-	})
-}
-
-// SetRunCondition updates the "Ready" condition on an SwarmRun status.
+// SetRunCondition updates the Ready condition on an SwarmRun status.
 func SetRunCondition(f *kubeswarmv1alpha1.SwarmRun, status metav1.ConditionStatus, reason, message string) {
 	apimeta.SetStatusCondition(&f.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
+		Type:               kubeswarmv1alpha1.ConditionReady,
 		Status:             status,
 		ObservedGeneration: f.Generation,
 		Reason:             reason,
@@ -201,8 +190,12 @@ Rules:
 - Preserve specific values: numbers, names, URLs, identifiers, code snippets.
 - Output plain text. No headers. No bullet lists unless the original used them.`
 
-// ContextStrategyNone is returned by ApplyContextPolicy when strategy=none.
-const ContextStrategyNone = "none"
+const (
+	ContextStrategyFull     = "full"
+	ContextStrategyCompress = "compress"
+	ContextStrategyExtract  = "extract"
+	ContextStrategyNone     = "none"
+)
 
 // ApplyContextPolicyResult holds the outcome of applying a context policy.
 type ApplyContextPolicyResult struct {
@@ -231,22 +224,22 @@ func ApplyContextPolicy(
 	policy *kubeswarmv1alpha1.StepContextPolicy,
 	pipelineDefaultModel string,
 ) ApplyContextPolicyResult {
-	if policy == nil || policy.Strategy == "" || policy.Strategy == "full" {
+	if policy == nil || policy.Strategy == "" || policy.Strategy == ContextStrategyFull {
 		return ApplyContextPolicyResult{Output: rawOutput}
 	}
 
 	switch policy.Strategy {
-	case "none":
+	case ContextStrategyNone:
 		return ApplyContextPolicyResult{Output: "", RawOutput: rawOutput}
 
-	case "extract":
-		if policy.Extract == nil || policy.Extract.Path == "" {
+	case ContextStrategyExtract:
+		if policy.ExtractPath == "" {
 			return ApplyContextPolicyResult{Output: rawOutput}
 		}
-		extracted := applyExtract(rawOutput, policy.Extract.Path)
+		extracted := applyExtract(rawOutput, policy.ExtractPath)
 		return ApplyContextPolicyResult{Output: extracted, RawOutput: rawOutput}
 
-	case "compress":
+	case ContextStrategyCompress:
 		if rawOutput == "" {
 			return ApplyContextPolicyResult{Output: rawOutput}
 		}
@@ -275,25 +268,25 @@ func ApplyCompressionResult(st *kubeswarmv1alpha1.PipelineStepStatus, compressed
 	st.CompressionTokens = approximateTokens(compressed)
 }
 
-// applyExtract evaluates path against output. It tries JSONPath (via gjson) first
-// when the output is valid JSON; otherwise it falls back to a Go regexp with the
-// first capture group. On failure it returns the original output unchanged.
+// extractRegexpCache caches compiled regexps for applyExtract. Keyed by pattern string.
+var extractRegexpCache sync.Map // map[string]*regexp.Regexp
+
+// applyExtract evaluates path against output. It tries a dotted JSON key path
+// first when the output is valid JSON; otherwise it falls back to a Go regexp
+// with the first capture group. On failure it returns the original output unchanged.
 func applyExtract(output, path string) string {
 	trimmed := strings.TrimSpace(output)
 
-	// Try gjson (JSONPath-like) when output looks like JSON.
+	// Try dotted-key JSON lookup when output looks like JSON.
 	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
-		if gjson.Valid(trimmed) {
-			result := gjson.Get(trimmed, path)
-			if result.Exists() {
-				return result.String()
-			}
-			// JSONPath matched nothing - fall through to regexp.
+		if v, ok := jsonGet(trimmed, path); ok {
+			return v
 		}
+		// JSON lookup matched nothing - fall through to regexp.
 	}
 
 	// Try regexp: return first capture group, or whole match if no groups.
-	re, err := regexp.Compile(path)
+	re, err := getOrCompileRegexp(path)
 	if err != nil {
 		return output // invalid regexp - return original
 	}
@@ -305,6 +298,63 @@ func applyExtract(output, path string) string {
 		return matches[1] // first capture group
 	}
 	return matches[0] // whole match
+}
+
+// jsonGet walks a dotted key path (e.g. "foo.bar") into a JSON string and
+// returns the leaf value as a string. It supports nested objects; array indexing
+// is not implemented (callers fall through to regexp for that).
+func jsonGet(jsonStr, path string) (string, bool) {
+	var raw any
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		return "", false
+	}
+
+	keys := strings.Split(path, ".")
+	cur := raw
+	for _, key := range keys {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return "", false
+		}
+		cur, ok = m[key]
+		if !ok {
+			return "", false
+		}
+	}
+
+	switch v := cur.(type) {
+	case string:
+		return v, true
+	case float64:
+		if v == float64(int64(v)) {
+			return strconv.FormatInt(int64(v), 10), true
+		}
+		return strconv.FormatFloat(v, 'f', -1, 64), true
+	case bool:
+		return strconv.FormatBool(v), true
+	case nil:
+		return "null", true
+	default:
+		// Nested object/array - marshal back to JSON string.
+		b, err := json.Marshal(v)
+		if err != nil {
+			return "", false
+		}
+		return string(b), true
+	}
+}
+
+// getOrCompileRegexp returns a cached compiled regexp, compiling and caching on first use.
+func getOrCompileRegexp(pattern string) (*regexp.Regexp, error) {
+	if cached, ok := extractRegexpCache.Load(pattern); ok {
+		return cached.(*regexp.Regexp), nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	extractRegexpCache.Store(pattern, re)
+	return re, nil
 }
 
 // buildCompressionPrompt assembles the user prompt for the compression LLM call.

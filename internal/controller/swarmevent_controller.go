@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
+	"sync"
 	"text/template"
 	"time"
 
@@ -52,6 +53,17 @@ type SwarmEventReconciler struct {
 	// If empty, webhook-type triggers will record an empty webhookURL in status.
 	TriggerWebhookURL string
 	Recorder          events.EventRecorder
+
+	// cronCache caches parsed cron schedules keyed by UID.
+	// Each entry stores the schedule and the ResourceVersion it was parsed from.
+	// Stale entries (ResourceVersion mismatch) are replaced in-place, keeping
+	// the map bounded to at most one entry per live SwarmEvent.
+	cronCache sync.Map // map[types.UID]cronCacheEntry
+}
+
+type cronCacheEntry struct {
+	schedule        cron.Schedule
+	resourceVersion string
 }
 
 // FireContext carries information about a trigger firing event, used to resolve
@@ -121,11 +133,22 @@ func (r *SwarmEventReconciler) reconcileCron(ctx context.Context, trigger *kubes
 		return ctrl.Result{}, nil
 	}
 
-	schedule, err := cron.ParseStandard(trigger.Spec.Source.Cron)
-	if err != nil {
-		r.setCondition(trigger, metav1.ConditionFalse, "InvalidCron",
-			fmt.Sprintf("invalid cron expression %q: %v", trigger.Spec.Source.Cron, err))
-		return ctrl.Result{}, nil
+	var schedule cron.Schedule
+	if cached, ok := r.cronCache.Load(trigger.UID); ok {
+		entry := cached.(cronCacheEntry)
+		if entry.resourceVersion == trigger.ResourceVersion {
+			schedule = entry.schedule
+		}
+	}
+	if schedule == nil {
+		var err error
+		schedule, err = cron.ParseStandard(trigger.Spec.Source.Cron)
+		if err != nil {
+			r.setCondition(trigger, metav1.ConditionFalse, "InvalidCron",
+				fmt.Sprintf("invalid cron expression %q: %v", trigger.Spec.Source.Cron, err))
+			return ctrl.Result{}, nil
+		}
+		r.cronCache.Store(trigger.UID, cronCacheEntry{schedule: schedule, resourceVersion: trigger.ResourceVersion})
 	}
 
 	now := time.Now().UTC()
@@ -340,16 +363,16 @@ func (r *SwarmEventReconciler) buildRun(
 	suffix := time.Now().UTC().Format("20060102-150405")
 	annotations := map[string]string{}
 	if fireCtx.StreamKey != "" {
-		annotations["kubeswarm/stream-key"] = fireCtx.StreamKey
+		annotations[kubeswarmv1alpha1.AnnotationStreamKey] = fireCtx.StreamKey
 	}
 	run := &kubeswarmv1alpha1.SwarmRun{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-%s-%s", trigger.Name, target.Team, suffix),
 			Namespace: trigger.Namespace,
 			Labels: map[string]string{
-				"kubeswarm/trigger":          trigger.Name,
-				"kubeswarm/trigger-template": target.Team,
-				"kubeswarm/team":             target.Team,
+				kubeswarmv1alpha1.LabelTrigger:         trigger.Name,
+				kubeswarmv1alpha1.LabelTriggerTemplate: target.Team,
+				kubeswarmv1alpha1.LabelTeam:            target.Team,
 			},
 			Annotations: annotations,
 		},
@@ -373,7 +396,7 @@ func (r *SwarmEventReconciler) buildRun(
 	// collected when the team is deleted (e.g. kubectl delete -f team.yaml).
 	trueVal := true
 	run.OwnerReferences = append(run.OwnerReferences, metav1.OwnerReference{
-		APIVersion:         "kubeswarm/v1alpha1",
+		APIVersion:         kubeswarmv1alpha1.GroupVersion.String(),
 		Kind:               "SwarmTeam",
 		Name:               tmpl.Name,
 		UID:                tmpl.UID,
@@ -409,15 +432,15 @@ func (r *SwarmEventReconciler) buildAgentRun(
 	suffix := time.Now().UTC().Format("20060102-150405")
 	annotations := map[string]string{}
 	if fireCtx.StreamKey != "" {
-		annotations["kubeswarm/stream-key"] = fireCtx.StreamKey
+		annotations[kubeswarmv1alpha1.AnnotationStreamKey] = fireCtx.StreamKey
 	}
 	run := &kubeswarmv1alpha1.SwarmRun{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-%s-%s", trigger.Name, target.Agent, suffix),
 			Namespace: trigger.Namespace,
 			Labels: map[string]string{
-				"kubeswarm/trigger": trigger.Name,
-				"kubeswarm/agent":   target.Agent,
+				kubeswarmv1alpha1.LabelTrigger: trigger.Name,
+				"kubeswarm/agent":              target.Agent,
 			},
 			Annotations: annotations,
 		},
@@ -451,7 +474,7 @@ func (r *SwarmEventReconciler) hasRunningRun(ctx context.Context, trigger *kubes
 	list := &kubeswarmv1alpha1.SwarmRunList{}
 	if err := r.List(ctx, list,
 		client.InNamespace(trigger.Namespace),
-		client.MatchingLabels{"kubeswarm/trigger": trigger.Name},
+		client.MatchingLabels{kubeswarmv1alpha1.LabelTrigger: trigger.Name},
 	); err != nil {
 		return false, err
 	}
@@ -465,9 +488,12 @@ func (r *SwarmEventReconciler) hasRunningRun(ctx context.Context, trigger *kubes
 	return false, nil
 }
 
+// triggerTemplateCache caches parsed Go templates for trigger expressions.
+var triggerTemplateCache sync.Map // map[string]*template.Template
+
 // resolveTriggerTemplate evaluates a Go template expression against the FireContext.
 func resolveTriggerTemplate(expr string, fireCtx FireContext) (string, error) {
-	tmpl, err := template.New("").Option("missingkey=zero").Parse(expr)
+	tmpl, err := getOrParseTriggerTemplate(expr)
 	if err != nil {
 		return expr, nil // not a template - return as-is
 	}
@@ -484,6 +510,19 @@ func resolveTriggerTemplate(expr string, fireCtx FireContext) (string, error) {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+// getOrParseTriggerTemplate returns a cached parsed template, parsing and caching on first use.
+func getOrParseTriggerTemplate(expr string) (*template.Template, error) {
+	if cached, ok := triggerTemplateCache.Load(expr); ok {
+		return cached.(*template.Template), nil
+	}
+	tmpl, err := template.New("").Option("missingkey=zero").Parse(expr)
+	if err != nil {
+		return nil, err
+	}
+	triggerTemplateCache.Store(expr, tmpl)
+	return tmpl, nil
 }
 
 // mostRecentSchedule returns the most recent time before now that the schedule was due,
@@ -514,18 +553,11 @@ func (r *SwarmEventReconciler) getLatestRunForTeam(ctx context.Context, namespac
 	var runs kubeswarmv1alpha1.SwarmRunList
 	if err := r.List(ctx, &runs,
 		client.InNamespace(namespace),
-		client.MatchingLabels{"kubeswarm/team": teamName},
+		client.MatchingLabels{kubeswarmv1alpha1.LabelTeam: teamName},
 	); err != nil {
 		return nil
 	}
-	var latest *kubeswarmv1alpha1.SwarmRun
-	for i := range runs.Items {
-		run := &runs.Items[i]
-		if latest == nil || run.CreationTimestamp.After(latest.CreationTimestamp.Time) {
-			latest = run
-		}
-	}
-	return latest
+	return latestRunFromList(runs.Items)
 }
 
 func (r *SwarmEventReconciler) setCondition(
@@ -533,24 +565,7 @@ func (r *SwarmEventReconciler) setCondition(
 	status metav1.ConditionStatus,
 	reason, message string,
 ) {
-	now := metav1.Now()
-	condType := kubeswarmv1alpha1.ConditionReady
-	for i, c := range trigger.Status.Conditions {
-		if c.Type == condType {
-			trigger.Status.Conditions[i].Status = status
-			trigger.Status.Conditions[i].Reason = reason
-			trigger.Status.Conditions[i].Message = message
-			trigger.Status.Conditions[i].LastTransitionTime = now
-			return
-		}
-	}
-	trigger.Status.Conditions = append(trigger.Status.Conditions, metav1.Condition{
-		Type:               condType,
-		Status:             status,
-		Reason:             reason,
-		Message:            message,
-		LastTransitionTime: now,
-	})
+	setCondition(&trigger.Status.Conditions, trigger.Generation, "", status, reason, message)
 }
 
 // SetupWithManager registers the controller and sets up watches.
