@@ -1,0 +1,431 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: swarmpolicies.kubeswarm.io
+spec:
+  group: kubeswarm.io
+  names:
+    categories:
+    - kubeswarm
+    kind: SwarmPolicy
+    listKind: SwarmPolicyList
+    plural: swarmpolicies
+    shortNames:
+    - swpol
+    - swpols
+    singular: swarmpolicy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.enforcementMode
+      name: Mode
+      type: string
+    - jsonPath: .status.agentCount
+      name: Agents
+      type: integer
+    - jsonPath: .status.compliantCount
+      name: Compliant
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SwarmPolicy defines platform-level guardrails enforced on all SwarmAgents
+          in the namespace. Agent authors cannot weaken policy constraints.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SwarmPolicySpec defines the policy constraints.
+            properties:
+              enforcementMode:
+                default: Audit
+                description: |-
+                  EnforcementMode controls whether violations cause admission rejection
+                  (Enforce), admission warnings (Warn), or are only logged (Audit).
+                  Default: Audit.
+                enum:
+                - Audit
+                - Warn
+                - Enforce
+                type: string
+              limits:
+                description: Limits sets ceilings and floors on agent execution parameters.
+                properties:
+                  maxAnswerTokensPerCall:
+                    description: MaxAnswerTokensPerCall is the ceiling on guardrails.limits.maxAnswerTokensPerCall.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  maxConcurrentTasks:
+                    description: MaxConcurrentTasks is the ceiling on guardrails.limits.concurrentTasks.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  maxDailyTokens:
+                    description: |-
+                      MaxDailyTokens is the ceiling on guardrails.limits.dailyTokens.
+                      An agent requesting more is rejected (Enforce), warned (Warn),
+                      or flagged (Audit). An agent omitting dailyTokens gets this as
+                      the effective limit at runtime.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  maxThinkingTokensPerCall:
+                    description: MaxThinkingTokensPerCall is the ceiling on guardrails.limits.maxThinkingTokensPerCall.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  maxTimeoutSeconds:
+                    description: MaxTimeoutSeconds is the ceiling on guardrails.limits.timeoutSeconds.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  maxTokensPerCall:
+                    description: MaxTokensPerCall is the ceiling on guardrails.limits.tokensPerCall.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  minTimeoutSeconds:
+                    description: |-
+                      MinTimeoutSeconds is the floor on guardrails.limits.timeoutSeconds.
+                      Prevents agents from setting unreasonably short timeouts.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                type: object
+                x-kubernetes-validations:
+                - message: minTimeoutSeconds must not exceed maxTimeoutSeconds
+                  rule: '!has(self.minTimeoutSeconds) || !has(self.maxTimeoutSeconds)
+                    || self.minTimeoutSeconds <= self.maxTimeoutSeconds'
+              models:
+                description: Models restricts which models agents may use.
+                properties:
+                  allowed:
+                    description: |-
+                      Allowed is a list of glob patterns for permitted models.
+                      When multiple policies specify allowed lists, the intersection is used.
+                    items:
+                      type: string
+                    maxItems: 100
+                    type: array
+                  denied:
+                    description: |-
+                      Denied is a list of glob patterns for forbidden models.
+                      When multiple policies specify denied lists, the union is used.
+                    items:
+                      type: string
+                    maxItems: 100
+                    type: array
+                type: object
+              output:
+                description: Output sets minimum output validation requirements.
+                properties:
+                  denyPatterns:
+                    description: |-
+                      DenyPatterns are RE2 regex patterns merged into every step's
+                      rejectPatterns at runtime. Invalid regexes are rejected at admission.
+                    items:
+                      type: string
+                    maxItems: 50
+                    type: array
+                  minValidation:
+                    default: none
+                    description: |-
+                      MinValidation is the minimum validation level required on all
+                      SwarmTeam steps referencing agents in this namespace.
+                    enum:
+                    - none
+                    - pattern
+                    - schema
+                    - semantic
+                    type: string
+                type: object
+              requirements:
+                description: Requirements defines boolean requirements that all agents
+                  must satisfy.
+                properties:
+                  allowList:
+                    description: AllowList requires all agents to have a non-empty
+                      tool allow list.
+                    type: boolean
+                  audit:
+                    description: Audit requires all agents to have audit logging enabled.
+                    type: boolean
+                  budgetRef:
+                    description: BudgetRef requires all agents in the namespace to
+                      reference a SwarmBudget.
+                    type: boolean
+                type: object
+              tools:
+                description: Tools sets tool access restrictions.
+                properties:
+                  deny:
+                    description: |-
+                      Deny is a deny list merged with each agent's guardrails.tools.deny.
+                      Agents cannot remove entries from the policy deny list. Deny always
+                      takes precedence over allow.
+                    items:
+                      type: string
+                    maxItems: 100
+                    type: array
+                  forceTrustLevel:
+                    allOf:
+                    - enum:
+                      - internal
+                      - external
+                      - sandbox
+                    - enum:
+                      - internal
+                      - external
+                      - sandbox
+                    description: |-
+                      ForceTrustLevel sets the minimum trust level for all agents.
+                      Agents cannot use a more permissive level.
+                      Ordering: sandbox (strictest) > external > internal (most permissive).
+                    type: string
+                type: object
+            type: object
+            x-kubernetes-validations:
+            - message: policy must define at least one constraint
+              rule: has(self.limits) || has(self.tools) || has(self.output) || has(self.models)
+                || self.requirements.budgetRef || self.requirements.audit || self.requirements.allowList
+          status:
+            description: SwarmPolicyStatus reports the compliance state of agents
+              in the namespace.
+            properties:
+              agentCount:
+                description: AgentCount is the total number of SwarmAgents in the
+                  namespace.
+                type: integer
+              compliantCount:
+                description: CompliantCount is the number of agents satisfying all
+                  policy constraints.
+                type: integer
+              conditions:
+                description: Conditions reflect the policy controller's state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              effectivePolicy:
+                description: EffectivePolicy is the merged result of all SwarmPolicies
+                  in the namespace.
+                properties:
+                  denyPatterns:
+                    description: DenyPatterns is the union of all policy output deny
+                      patterns.
+                    items:
+                      type: string
+                    maxItems: 50
+                    type: array
+                  enforcementMode:
+                    description: |-
+                      EnforcementMode is the strictest mode across all policies.
+                      Enforce > Warn > Audit.
+                    enum:
+                    - Audit
+                    - Warn
+                    - Enforce
+                    type: string
+                  forceTrustLevel:
+                    description: ForceTrustLevel is the strictest trust level across
+                      all policies.
+                    enum:
+                    - internal
+                    - external
+                    - sandbox
+                    type: string
+                  limits:
+                    description: Limits is the merged ceiling/floor result.
+                    properties:
+                      maxAnswerTokensPerCall:
+                        description: MaxAnswerTokensPerCall is the ceiling on guardrails.limits.maxAnswerTokensPerCall.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxConcurrentTasks:
+                        description: MaxConcurrentTasks is the ceiling on guardrails.limits.concurrentTasks.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxDailyTokens:
+                        description: |-
+                          MaxDailyTokens is the ceiling on guardrails.limits.dailyTokens.
+                          An agent requesting more is rejected (Enforce), warned (Warn),
+                          or flagged (Audit). An agent omitting dailyTokens gets this as
+                          the effective limit at runtime.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      maxThinkingTokensPerCall:
+                        description: MaxThinkingTokensPerCall is the ceiling on guardrails.limits.maxThinkingTokensPerCall.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxTimeoutSeconds:
+                        description: MaxTimeoutSeconds is the ceiling on guardrails.limits.timeoutSeconds.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxTokensPerCall:
+                        description: MaxTokensPerCall is the ceiling on guardrails.limits.tokensPerCall.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      minTimeoutSeconds:
+                        description: |-
+                          MinTimeoutSeconds is the floor on guardrails.limits.timeoutSeconds.
+                          Prevents agents from setting unreasonably short timeouts.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    type: object
+                    x-kubernetes-validations:
+                    - message: minTimeoutSeconds must not exceed maxTimeoutSeconds
+                      rule: '!has(self.minTimeoutSeconds) || !has(self.maxTimeoutSeconds)
+                        || self.minTimeoutSeconds <= self.maxTimeoutSeconds'
+                  minValidation:
+                    description: MinValidation is the strictest validation level across
+                      all policies.
+                    enum:
+                    - none
+                    - pattern
+                    - schema
+                    - semantic
+                    type: string
+                  models:
+                    description: Models is the merged model restriction.
+                    properties:
+                      allowed:
+                        description: |-
+                          Allowed is a list of glob patterns for permitted models.
+                          When multiple policies specify allowed lists, the intersection is used.
+                        items:
+                          type: string
+                        maxItems: 100
+                        type: array
+                      denied:
+                        description: |-
+                          Denied is a list of glob patterns for forbidden models.
+                          When multiple policies specify denied lists, the union is used.
+                        items:
+                          type: string
+                        maxItems: 100
+                        type: array
+                    type: object
+                  requirements:
+                    description: Requirements is the merged boolean requirements (OR
+                      across policies).
+                    properties:
+                      allowList:
+                        description: AllowList requires all agents to have a non-empty
+                          tool allow list.
+                        type: boolean
+                      audit:
+                        description: Audit requires all agents to have audit logging
+                          enabled.
+                        type: boolean
+                      budgetRef:
+                        description: BudgetRef requires all agents in the namespace
+                          to reference a SwarmBudget.
+                        type: boolean
+                    type: object
+                  toolDeny:
+                    description: ToolDeny is the union of all policy deny lists.
+                    items:
+                      type: string
+                    maxItems: 100
+                    type: array
+                type: object
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation this status
+                  reflects.
+                format: int64
+                type: integer
+            required:
+            - agentCount
+            - compliantCount
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

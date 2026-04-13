@@ -92,6 +92,7 @@ rules:
   - swarmevents/status
   - swarmmemories/status
   - swarmnotifies/status
+  - swarmpolicies/status
   - swarmruns/status
   - swarmsettings/status
   - swarmteams/status
@@ -99,6 +100,14 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - kubeswarm.io
+  resources:
+  - swarmpolicies
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - networking.k8s.io
   resources:
