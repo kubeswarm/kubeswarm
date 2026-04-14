@@ -17,8 +17,8 @@ limitations under the License.
 package controller
 
 import (
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"slices"
+	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -32,17 +32,20 @@ import (
 // buildTestDeployment calls the production buildDeployment with minimal dependencies.
 func buildTestDeployment(agent *kubeswarmv1alpha1.SwarmAgent) *appsv1.Deployment {
 	r := &SwarmAgentReconciler{AgentImage: "test-image:latest"}
-	return r.buildDeployment(agent, nil, nil, "assembled prompt", nil, "", nil)
+	return r.buildDeployment(deploymentInput{
+		swarmAgent:      agent,
+		assembledPrompt: "assembled prompt",
+	})
 }
 
-var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
+func TestSwarmAgentControllerBuildDeployment(t *testing.T) {
 
 	// -------------------------------------------------------------------------
 	// Replicas
 	// -------------------------------------------------------------------------
 
-	Context("replicas", func() {
-		It("should default to 1 replica when runtime is nil", func() {
+	t.Run("replicas", func(t *testing.T) {
+		t.Run("should default to 1 replica when runtime is nil", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -51,10 +54,10 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 				},
 			}
 			dep := buildTestDeployment(agent)
-			Expect(*dep.Spec.Replicas).To(Equal(int32(1)))
+			requireEqual(t, *dep.Spec.Replicas, int32(1))
 		})
 
-		It("should use spec.runtime.replicas", func() {
+		t.Run("should use spec.runtime.replicas", func(t *testing.T) {
 			replicas := int32(5)
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
@@ -65,10 +68,10 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 				},
 			}
 			dep := buildTestDeployment(agent)
-			Expect(*dep.Spec.Replicas).To(Equal(int32(5)))
+			requireEqual(t, *dep.Spec.Replicas, int32(5))
 		})
 
-		It("should scale to 0 when BudgetExceeded condition is True", func() {
+		t.Run("should scale to 0 when BudgetExceeded condition is True", func(t *testing.T) {
 			replicas := int32(3)
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
@@ -80,15 +83,15 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 			}
 			// Set BudgetExceeded condition.
 			apimeta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
-				Type:   "BudgetExceeded",
+				Type:   kubeswarmv1alpha1.ConditionBudgetExceeded,
 				Status: metav1.ConditionTrue,
 				Reason: "DailyLimitReached",
 			})
 			dep := buildTestDeployment(agent)
-			Expect(*dep.Spec.Replicas).To(Equal(int32(0)), "should scale to 0 when budget exceeded")
+			requireEqual(t, *dep.Spec.Replicas, int32(0), "should scale to 0 when budget exceeded")
 		})
 
-		It("should not scale to 0 when BudgetExceeded is False", func() {
+		t.Run("should not scale to 0 when BudgetExceeded is False", func(t *testing.T) {
 			replicas := int32(2)
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
@@ -99,12 +102,12 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 				},
 			}
 			apimeta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
-				Type:   "BudgetExceeded",
+				Type:   kubeswarmv1alpha1.ConditionBudgetExceeded,
 				Status: metav1.ConditionFalse,
 				Reason: "WithinBudget",
 			})
 			dep := buildTestDeployment(agent)
-			Expect(*dep.Spec.Replicas).To(Equal(int32(2)))
+			requireEqual(t, *dep.Spec.Replicas, int32(2))
 		})
 	})
 
@@ -112,8 +115,8 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 	// Resources
 	// -------------------------------------------------------------------------
 
-	Context("resources", func() {
-		It("should inject default resources when runtime.resources is nil", func() {
+	t.Run("resources", func(t *testing.T) {
+		t.Run("should inject default resources when runtime.resources is nil", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -123,16 +126,18 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 			}
 			dep := buildTestDeployment(agent)
 			containers := dep.Spec.Template.Spec.Containers
-			Expect(containers).NotTo(BeEmpty())
+			if len(containers) == 0 {
+				t.Fatal("expected non-empty containers")
+			}
 			res := containers[0].Resources
 			// The controller injects defaults: cpu 100m/500m, memory 128Mi/512Mi.
-			Expect(res.Requests.Cpu().String()).To(Equal("100m"))
-			Expect(res.Requests.Memory().String()).To(Equal("128Mi"))
-			Expect(res.Limits.Cpu().String()).To(Equal("500m"))
-			Expect(res.Limits.Memory().String()).To(Equal("512Mi"))
+			requireEqual(t, res.Requests.Cpu().String(), "100m")
+			requireEqual(t, res.Requests.Memory().String(), "128Mi")
+			requireEqual(t, res.Limits.Cpu().String(), "500m")
+			requireEqual(t, res.Limits.Memory().String(), "512Mi")
 		})
 
-		It("should use custom resources when specified", func() {
+		t.Run("should use custom resources when specified", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -154,8 +159,8 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 			}
 			dep := buildTestDeployment(agent)
 			res := dep.Spec.Template.Spec.Containers[0].Resources
-			Expect(res.Requests.Cpu().String()).To(Equal("200m"))
-			Expect(res.Limits.Memory().String()).To(Equal("1Gi"))
+			requireEqual(t, res.Requests.Cpu().String(), "200m")
+			requireEqual(t, res.Limits.Memory().String(), "1Gi")
 		})
 	})
 
@@ -163,8 +168,8 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 	// Deployment metadata
 	// -------------------------------------------------------------------------
 
-	Context("deployment metadata", func() {
-		It("should name the Deployment <agent-name>-agent", func() {
+	t.Run("deployment metadata", func(t *testing.T) {
+		t.Run("should name the Deployment <agent-name>-agent", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "code-reviewer", Namespace: "prod"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -173,11 +178,11 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 				},
 			}
 			dep := buildTestDeployment(agent)
-			Expect(dep.Name).To(Equal("code-reviewer-agent"))
-			Expect(dep.Namespace).To(Equal("prod"))
+			requireEqual(t, dep.Name, "code-reviewer-agent")
+			requireEqual(t, dep.Namespace, "prod")
 		})
 
-		It("should set standard labels", func() {
+		t.Run("should set standard labels", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "my-agent", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -186,10 +191,10 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 				},
 			}
 			dep := buildTestDeployment(agent)
-			Expect(dep.Labels["app.kubernetes.io/name"]).To(Equal("agent"))
-			Expect(dep.Labels["app.kubernetes.io/instance"]).To(Equal("my-agent"))
-			Expect(dep.Labels["app.kubernetes.io/managed-by"]).To(Equal("kubeswarm"))
-			Expect(dep.Labels["kubeswarm/deployment"]).To(Equal("my-agent"))
+			requireEqual(t, dep.Labels["app.kubernetes.io/name"], "agent")
+			requireEqual(t, dep.Labels["app.kubernetes.io/instance"], "my-agent")
+			requireEqual(t, dep.Labels["app.kubernetes.io/managed-by"], "kubeswarm")
+			requireEqual(t, dep.Labels["kubeswarm/deployment"], "my-agent")
 		})
 	})
 
@@ -197,8 +202,8 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 	// Container image
 	// -------------------------------------------------------------------------
 
-	Context("container image", func() {
-		It("should use the reconciler's AgentImage", func() {
+	t.Run("container image", func(t *testing.T) {
+		t.Run("should use the reconciler's AgentImage", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -207,7 +212,7 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 				},
 			}
 			dep := buildTestDeployment(agent)
-			Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal("test-image:latest"))
+			requireEqual(t, dep.Spec.Template.Spec.Containers[0].Image, "test-image:latest")
 		})
 	})
 
@@ -215,8 +220,8 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 	// Security context
 	// -------------------------------------------------------------------------
 
-	Context("security context", func() {
-		It("should run as non-root with read-only filesystem", func() {
+	t.Run("security context", func(t *testing.T) {
+		t.Run("should run as non-root with read-only filesystem", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -226,10 +231,13 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 			}
 			dep := buildTestDeployment(agent)
 			sc := dep.Spec.Template.Spec.Containers[0].SecurityContext
-			Expect(sc).NotTo(BeNil())
-			Expect(*sc.AllowPrivilegeEscalation).To(BeFalse())
-			Expect(*sc.ReadOnlyRootFilesystem).To(BeTrue())
-			Expect(sc.Capabilities.Drop).To(ContainElement(corev1.Capability("ALL")))
+			requireNotNil(t, sc)
+			requireFalse(t, *sc.AllowPrivilegeEscalation)
+			requireTrue(t, *sc.ReadOnlyRootFilesystem)
+			found := slices.Contains(sc.Capabilities.Drop, corev1.Capability("ALL"))
+			if !found {
+				t.Fatal("expected Capabilities.Drop to contain ALL")
+			}
 		})
 	})
 
@@ -237,8 +245,8 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 	// ExposedMCPCapabilities in status
 	// -------------------------------------------------------------------------
 
-	Context("exposed MCP capabilities", func() {
-		It("should list exposed capability names", func() {
+	t.Run("exposed MCP capabilities", func(t *testing.T) {
+		t.Run("should list exposed capability names", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -258,7 +266,9 @@ var _ = Describe("SwarmAgent Controller - buildDeployment", func() {
 					exposed = append(exposed, cap.Name)
 				}
 			}
-			Expect(exposed).To(Equal([]string{"search", "deploy"}))
+			requireLen(t, exposed, 2)
+			requireEqual(t, exposed[0], "search")
+			requireEqual(t, exposed[1], "deploy")
 		})
 	})
-})
+}

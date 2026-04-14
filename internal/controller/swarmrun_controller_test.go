@@ -20,10 +20,8 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"testing"
 	"time"
-
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -39,8 +37,8 @@ import (
 
 type fakeRunQueue struct {
 	mu       sync.Mutex
-	tasks    map[string]string // taskID → output
-	counters map[string]int    // prompt → submit count
+	tasks    map[string]string // taskID -> output
+	counters map[string]int    // prompt -> submit count
 	nextID   int
 	err      error // if set, Submit returns this error
 }
@@ -96,7 +94,7 @@ func (q *fakeRunQueue) Close()                                     {}
 // SwarmRun controller integration tests.
 // ---------------------------------------------------------------------------
 
-var _ = Describe("SwarmRun Controller", func() {
+func TestSwarmRunController(t *testing.T) {
 	const namespace = "default"
 
 	ctx := context.Background()
@@ -132,7 +130,7 @@ var _ = Describe("SwarmRun Controller", func() {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
 				Namespace: namespace,
-				Labels:    map[string]string{"kubeswarm/team": teamRef},
+				Labels:    map[string]string{kubeswarmv1alpha1.LabelTeam: teamRef},
 			},
 			Spec: kubeswarmv1alpha1.SwarmRunSpec{
 				TeamRef:  teamRef,
@@ -142,62 +140,62 @@ var _ = Describe("SwarmRun Controller", func() {
 		}
 	}
 
-	Context("when no task queue is configured", func() {
+	t.Run("when no task queue is configured", func(t *testing.T) {
 		const runName = "swarmrun-no-queue"
-		AfterEach(func() { deleteRun(runName) })
+		t.Cleanup(func() { deleteRun(runName) })
 
-		It("should set NoTaskQueue condition and leave phase empty", func() {
+		t.Run("should set NoTaskQueue condition and leave phase empty", func(t *testing.T) {
 			run := newRun(runName, "my-team",
 				[]kubeswarmv1alpha1.SwarmTeamPipelineStep{{Role: "worker"}},
 				[]kubeswarmv1alpha1.SwarmTeamRole{{Name: "worker", Model: "claude-haiku-4-5"}},
 			)
-			Expect(k8sClient.Create(ctx, run)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, run))
 
 			result, err := reconcileRun(runName, nil)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Status.Phase).To(BeEmpty())
+			requireNoError(t, err)
+			requireEqual(t, result.Status.Phase, kubeswarmv1alpha1.SwarmRunPhase(""))
 			cond := findRunCond(result, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Reason).To(Equal("NoTaskQueue"))
+			requireNotNil(t, cond)
+			requireEqual(t, cond.Reason, "NoTaskQueue")
 		})
 	})
 
-	Context("single-step linear pipeline", func() {
+	t.Run("single-step linear pipeline", func(t *testing.T) {
 		const runName = "swarmrun-linear"
-		AfterEach(func() { deleteRun(runName) })
+		t.Cleanup(func() { deleteRun(runName) })
 
-		It("should submit the step on first reconcile and succeed after result is collected", func() {
+		t.Run("should submit the step on first reconcile and succeed after result is collected", func(t *testing.T) {
 			fq := newFakeRunQueue()
 			run := newRun(runName, "my-team",
 				[]kubeswarmv1alpha1.SwarmTeamPipelineStep{{Role: "worker"}},
 				[]kubeswarmv1alpha1.SwarmTeamRole{{Name: "worker", Model: "claude-haiku-4-5"}},
 			)
-			Expect(k8sClient.Create(ctx, run)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, run))
 
 			// First reconcile: steps initialized, task submitted, phase = Running.
 			result, err := reconcileRun(runName, fq)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Status.Phase).To(Equal(kubeswarmv1alpha1.SwarmRunPhaseRunning))
-			Expect(result.Status.Steps).To(HaveLen(1))
-			Expect(result.Status.Steps[0].Phase).To(Equal(kubeswarmv1alpha1.PipelineStepPhaseRunning))
-			Expect(result.Status.Steps[0].TaskID).NotTo(BeEmpty())
+			requireNoError(t, err)
+			requireEqual(t, result.Status.Phase, kubeswarmv1alpha1.SwarmRunPhaseRunning)
+			requireLen(t, result.Status.Steps, 1)
+			requireEqual(t, result.Status.Steps[0].Phase, kubeswarmv1alpha1.PipelineStepPhaseRunning)
+			requireNotEmpty(t, result.Status.Steps[0].TaskID)
 
 			// Second reconcile: result collected, phase = Succeeded.
 			result, err = reconcileRun(runName, fq)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Status.Phase).To(Equal(kubeswarmv1alpha1.SwarmRunPhaseSucceeded))
-			Expect(result.Status.Steps[0].Phase).To(Equal(kubeswarmv1alpha1.PipelineStepPhaseSucceeded))
-			Expect(result.Status.Steps[0].Output).To(ContainSubstring("output for:"))
-			Expect(result.Status.TotalTokenUsage).NotTo(BeNil())
-			Expect(result.Status.TotalTokenUsage.TotalTokens).To(BeNumerically(">", 0))
+			requireNoError(t, err)
+			requireEqual(t, result.Status.Phase, kubeswarmv1alpha1.SwarmRunPhaseSucceeded)
+			requireEqual(t, result.Status.Steps[0].Phase, kubeswarmv1alpha1.PipelineStepPhaseSucceeded)
+			requireContains(t, result.Status.Steps[0].Output, "output for:")
+			requireNotNil(t, result.Status.TotalTokenUsage)
+			requireGreaterThan(t, result.Status.TotalTokenUsage.TotalTokens, int64(0))
 		})
 	})
 
-	Context("two-step pipeline with dependency", func() {
+	t.Run("two-step pipeline with dependency", func(t *testing.T) {
 		const runName = "swarmrun-two-step"
-		AfterEach(func() { deleteRun(runName) })
+		t.Cleanup(func() { deleteRun(runName) })
 
-		It("should run steps in order and succeed", func() {
+		t.Run("should run steps in order and succeed", func(t *testing.T) {
 			fq := newFakeRunQueue()
 			run := newRun(runName, "my-team",
 				[]kubeswarmv1alpha1.SwarmTeamPipelineStep{
@@ -209,90 +207,90 @@ var _ = Describe("SwarmRun Controller", func() {
 					{Name: "step-b", Model: "claude-haiku-4-5"},
 				},
 			)
-			Expect(k8sClient.Create(ctx, run)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, run))
 
 			// Reconcile 1: step-a submitted, step-b still pending.
 			result, err := reconcileRun(runName, fq)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Status.Phase).To(Equal(kubeswarmv1alpha1.SwarmRunPhaseRunning))
-			Expect(findRunStep(result, "step-a").Phase).To(Equal(kubeswarmv1alpha1.PipelineStepPhaseRunning))
-			Expect(findRunStep(result, "step-b").Phase).To(Equal(kubeswarmv1alpha1.PipelineStepPhasePending))
+			requireNoError(t, err)
+			requireEqual(t, result.Status.Phase, kubeswarmv1alpha1.SwarmRunPhaseRunning)
+			requireEqual(t, findRunStep(result, "step-a").Phase, kubeswarmv1alpha1.PipelineStepPhaseRunning)
+			requireEqual(t, findRunStep(result, "step-b").Phase, kubeswarmv1alpha1.PipelineStepPhasePending)
 
 			// Reconcile 2: step-a result collected, step-b submitted.
 			result, err = reconcileRun(runName, fq)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(findRunStep(result, "step-a").Phase).To(Equal(kubeswarmv1alpha1.PipelineStepPhaseSucceeded))
-			Expect(findRunStep(result, "step-b").Phase).To(Equal(kubeswarmv1alpha1.PipelineStepPhaseRunning))
+			requireNoError(t, err)
+			requireEqual(t, findRunStep(result, "step-a").Phase, kubeswarmv1alpha1.PipelineStepPhaseSucceeded)
+			requireEqual(t, findRunStep(result, "step-b").Phase, kubeswarmv1alpha1.PipelineStepPhaseRunning)
 
 			// Reconcile 3: step-b result collected, run succeeds.
 			result, err = reconcileRun(runName, fq)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Status.Phase).To(Equal(kubeswarmv1alpha1.SwarmRunPhaseSucceeded))
-			Expect(findRunStep(result, "step-b").Phase).To(Equal(kubeswarmv1alpha1.PipelineStepPhaseSucceeded))
+			requireNoError(t, err)
+			requireEqual(t, result.Status.Phase, kubeswarmv1alpha1.SwarmRunPhaseSucceeded)
+			requireEqual(t, findRunStep(result, "step-b").Phase, kubeswarmv1alpha1.PipelineStepPhaseSucceeded)
 		})
 	})
 
-	Context("run timeout enforcement", func() {
+	t.Run("run timeout enforcement", func(t *testing.T) {
 		const runName = "swarmrun-timeout"
-		AfterEach(func() { deleteRun(runName) })
+		t.Cleanup(func() { deleteRun(runName) })
 
-		It("should fail the run when timeout is exceeded", func() {
+		t.Run("should fail the run when timeout is exceeded", func(t *testing.T) {
 			fq := newFakeRunQueue()
 			run := newRun(runName, "my-team",
 				[]kubeswarmv1alpha1.SwarmTeamPipelineStep{{Role: "slow"}},
 				[]kubeswarmv1alpha1.SwarmTeamRole{{Name: "slow", Model: "claude-haiku-4-5"}},
 			)
 			run.Spec.TimeoutSeconds = 1
-			Expect(k8sClient.Create(ctx, run)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, run))
 
 			// First reconcile starts the run and submits the step.
 			_, err := reconcileRun(runName, fq)
-			Expect(err).NotTo(HaveOccurred())
+			requireNoError(t, err)
 
 			// Manually backdate StartTime to simulate timeout.
 			fetched := &kubeswarmv1alpha1.SwarmRun{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: runName, Namespace: namespace}, fetched)).To(Succeed())
+			requireNoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: runName, Namespace: namespace}, fetched))
 			past := metav1.NewTime(time.Now().Add(-10 * time.Second))
 			fetched.Status.StartTime = &past
-			Expect(k8sClient.Status().Update(ctx, fetched)).To(Succeed())
+			requireNoError(t, k8sClient.Status().Update(ctx, fetched))
 
 			// Second reconcile should detect timeout.
 			result, err := reconcileRun(runName, fq)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Status.Phase).To(Equal(kubeswarmv1alpha1.SwarmRunPhaseFailed))
+			requireNoError(t, err)
+			requireEqual(t, result.Status.Phase, kubeswarmv1alpha1.SwarmRunPhaseFailed)
 			cond := findRunCond(result, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Reason).To(Equal("Timeout"))
+			requireNotNil(t, cond)
+			requireEqual(t, cond.Reason, "Timeout")
 		})
 	})
 
-	Context("terminal run", func() {
+	t.Run("terminal run", func(t *testing.T) {
 		const runName = "swarmrun-terminal"
-		AfterEach(func() { deleteRun(runName) })
+		t.Cleanup(func() { deleteRun(runName) })
 
-		It("should be a no-op when the run is already Succeeded", func() {
+		t.Run("should be a no-op when the run is already Succeeded", func(t *testing.T) {
 			fq := newFakeRunQueue()
 			run := newRun(runName, "my-team",
 				[]kubeswarmv1alpha1.SwarmTeamPipelineStep{{Role: "worker"}},
 				[]kubeswarmv1alpha1.SwarmTeamRole{{Name: "worker", Model: "claude-haiku-4-5"}},
 			)
-			Expect(k8sClient.Create(ctx, run)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, run))
 			run.Status.Phase = kubeswarmv1alpha1.SwarmRunPhaseSucceeded
-			Expect(k8sClient.Status().Update(ctx, run)).To(Succeed())
+			requireNoError(t, k8sClient.Status().Update(ctx, run))
 
 			result, err := reconcileRun(runName, fq)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Status.Phase).To(Equal(kubeswarmv1alpha1.SwarmRunPhaseSucceeded))
+			requireNoError(t, err)
+			requireEqual(t, result.Status.Phase, kubeswarmv1alpha1.SwarmRunPhaseSucceeded)
 			// Queue was not touched (no tasks submitted).
-			Expect(fq.nextID).To(Equal(0))
+			requireEqual(t, fq.nextID, 0)
 		})
 	})
 
-	Context("step if-condition skipping", func() {
+	t.Run("step if-condition skipping", func(t *testing.T) {
 		const runName = "swarmrun-skip"
-		AfterEach(func() { deleteRun(runName) })
+		t.Cleanup(func() { deleteRun(runName) })
 
-		It("should skip a step whose if condition is false", func() {
+		t.Run("should skip a step whose if condition is false", func(t *testing.T) {
 			fq := newFakeRunQueue()
 			run := newRun(runName, "my-team",
 				[]kubeswarmv1alpha1.SwarmTeamPipelineStep{
@@ -304,20 +302,20 @@ var _ = Describe("SwarmRun Controller", func() {
 					{Name: "step-b", Model: "claude-haiku-4-5"},
 				},
 			)
-			Expect(k8sClient.Create(ctx, run)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, run))
 
 			// Reconcile 1: step-a submitted.
 			_, err := reconcileRun(runName, fq)
-			Expect(err).NotTo(HaveOccurred())
+			requireNoError(t, err)
 
 			// Reconcile 2: step-a done, step-b evaluated and skipped, run succeeds.
 			result, err := reconcileRun(runName, fq)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Status.Phase).To(Equal(kubeswarmv1alpha1.SwarmRunPhaseSucceeded))
-			Expect(findRunStep(result, "step-b").Phase).To(Equal(kubeswarmv1alpha1.PipelineStepPhaseSkipped))
+			requireNoError(t, err)
+			requireEqual(t, result.Status.Phase, kubeswarmv1alpha1.SwarmRunPhaseSucceeded)
+			requireEqual(t, findRunStep(result, "step-b").Phase, kubeswarmv1alpha1.PipelineStepPhaseSkipped)
 		})
 	})
-})
+}
 
 // ---------------------------------------------------------------------------
 // Test helpers.
