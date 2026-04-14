@@ -94,7 +94,7 @@ func (p *Provider) RunTask(
 
 	var usage queue.TokenUsage
 
-	reasoningEnabled := cfg.ReasoningMode == "Auto" || cfg.ReasoningMode == "Explicit"
+	reasoningEnabled := cfg.ReasoningMode == config.ReasoningModeAuto || cfg.ReasoningMode == config.ReasoningModeExplicit
 	metricsInst := getAgentMetrics()
 	reasoningAttrs := []attribute.KeyValue{
 		attribute.String("provider", "anthropic"),
@@ -466,7 +466,7 @@ func buildAnthropicParams(cfg *config.Config, messages []anthropicsdk.MessagePar
 	}
 
 	// Reasoning off-path.
-	if cfg.ReasoningMode == "" || cfg.ReasoningMode == "Disabled" {
+	if cfg.ReasoningMode == "" || cfg.ReasoningMode == config.ReasoningModeDisabled {
 		return params
 	}
 
