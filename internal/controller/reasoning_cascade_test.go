@@ -1,40 +1,44 @@
 package controller
 
 import (
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"testing"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/kubeswarm/kubeswarm/api/v1alpha1"
 )
 
-var _ = Describe("mergeReasoningConfig", func() {
-	It("returns nil when neither settings nor agent set anything", func() {
+func TestMergeReasoningConfig(t *testing.T) {
+	t.Run("returns nil when neither settings nor agent set anything", func(t *testing.T) {
 		out := mergeReasoningConfig(nil, nil)
-		Expect(out).To(BeNil())
+		requireNil(t, out)
 
 		out = mergeReasoningConfig(nil, []v1alpha1.SwarmSettings{
 			{Spec: v1alpha1.SwarmSettingsSpec{}},
 			{Spec: v1alpha1.SwarmSettingsSpec{}},
 		})
-		Expect(out).To(BeNil())
+		requireNil(t, out)
 	})
 
-	It("returns agent config as-is when no settings provide reasoning", func() {
+	t.Run("returns agent config as-is when no settings provide reasoning", func(t *testing.T) {
 		agent := &v1alpha1.ReasoningConfig{
 			Mode:         v1alpha1.ReasoningExplicit,
 			Effort:       v1alpha1.ReasoningEffortHigh,
 			BudgetTokens: int32Ptr(4096),
 		}
 		out := mergeReasoningConfig(agent, nil)
-		Expect(out).NotTo(BeNil())
-		Expect(out.Mode).To(Equal(v1alpha1.ReasoningExplicit))
-		Expect(out.Effort).To(Equal(v1alpha1.ReasoningEffortHigh))
-		Expect(out.BudgetTokens).NotTo(BeNil())
-		Expect(*out.BudgetTokens).To(Equal(int32(4096)))
+		if out == nil {
+			t.Fatal("expected non-nil output")
+		}
+		requireEqual(t, out.Mode, v1alpha1.ReasoningExplicit)
+		requireEqual(t, out.Effort, v1alpha1.ReasoningEffortHigh)
+		if out.BudgetTokens == nil {
+			t.Fatal("expected non-nil BudgetTokens")
+		}
+		requireEqual(t, *out.BudgetTokens, int32(4096))
 	})
 
-	It("returns settings cascade when agent config is nil", func() {
+	t.Run("returns settings cascade when agent config is nil", func(t *testing.T) {
 		settings := []v1alpha1.SwarmSettings{
 			{Spec: v1alpha1.SwarmSettingsSpec{Reasoning: &v1alpha1.ReasoningDefaults{
 				Mode:         v1alpha1.ReasoningAuto,
@@ -43,13 +47,15 @@ var _ = Describe("mergeReasoningConfig", func() {
 			}}},
 		}
 		out := mergeReasoningConfig(nil, settings)
-		Expect(out).NotTo(BeNil())
-		Expect(out.Mode).To(Equal(v1alpha1.ReasoningAuto))
-		Expect(out.Effort).To(Equal(v1alpha1.ReasoningEffortMedium))
-		Expect(*out.BudgetTokens).To(Equal(int32(1024)))
+		if out == nil {
+			t.Fatal("expected non-nil output")
+		}
+		requireEqual(t, out.Mode, v1alpha1.ReasoningAuto)
+		requireEqual(t, out.Effort, v1alpha1.ReasoningEffortMedium)
+		requireEqual(t, *out.BudgetTokens, int32(1024))
 	})
 
-	It("per-agent fields override cascade fields", func() {
+	t.Run("per-agent fields override cascade fields", func(t *testing.T) {
 		settings := []v1alpha1.SwarmSettings{
 			{Spec: v1alpha1.SwarmSettingsSpec{Reasoning: &v1alpha1.ReasoningDefaults{
 				Mode:         v1alpha1.ReasoningAuto,
@@ -63,12 +69,12 @@ var _ = Describe("mergeReasoningConfig", func() {
 			BudgetTokens: int32Ptr(8192),
 		}
 		out := mergeReasoningConfig(agent, settings)
-		Expect(out.Mode).To(Equal(v1alpha1.ReasoningExplicit))
-		Expect(out.Effort).To(Equal(v1alpha1.ReasoningEffortHigh))
-		Expect(*out.BudgetTokens).To(Equal(int32(8192)))
+		requireEqual(t, out.Mode, v1alpha1.ReasoningExplicit)
+		requireEqual(t, out.Effort, v1alpha1.ReasoningEffortHigh)
+		requireEqual(t, *out.BudgetTokens, int32(8192))
 	})
 
-	It("per-agent Disabled overrides cascaded Auto (SC16)", func() {
+	t.Run("per-agent Disabled overrides cascaded Auto (SC16)", func(t *testing.T) {
 		settings := []v1alpha1.SwarmSettings{
 			{Spec: v1alpha1.SwarmSettingsSpec{Reasoning: &v1alpha1.ReasoningDefaults{
 				Mode: v1alpha1.ReasoningAuto,
@@ -76,11 +82,13 @@ var _ = Describe("mergeReasoningConfig", func() {
 		}
 		agent := &v1alpha1.ReasoningConfig{Mode: v1alpha1.ReasoningDisabled}
 		out := mergeReasoningConfig(agent, settings)
-		Expect(out).NotTo(BeNil())
-		Expect(out.Mode).To(Equal(v1alpha1.ReasoningDisabled))
+		if out == nil {
+			t.Fatal("expected non-nil output")
+		}
+		requireEqual(t, out.Mode, v1alpha1.ReasoningDisabled)
 	})
 
-	It("later setting in allSettings wins over earlier", func() {
+	t.Run("later setting in allSettings wins over earlier", func(t *testing.T) {
 		settings := []v1alpha1.SwarmSettings{
 			{Spec: v1alpha1.SwarmSettingsSpec{Reasoning: &v1alpha1.ReasoningDefaults{
 				Mode:         v1alpha1.ReasoningAuto,
@@ -94,12 +102,12 @@ var _ = Describe("mergeReasoningConfig", func() {
 			}}},
 		}
 		out := mergeReasoningConfig(nil, settings)
-		Expect(out.Mode).To(Equal(v1alpha1.ReasoningExplicit))
-		Expect(out.Effort).To(Equal(v1alpha1.ReasoningEffortHigh))
-		Expect(*out.BudgetTokens).To(Equal(int32(4096)))
+		requireEqual(t, out.Mode, v1alpha1.ReasoningExplicit)
+		requireEqual(t, out.Effort, v1alpha1.ReasoningEffortHigh)
+		requireEqual(t, *out.BudgetTokens, int32(4096))
 	})
 
-	It("composes partial fields: settings sets Mode, agent sets BudgetTokens", func() {
+	t.Run("composes partial fields: settings sets Mode, agent sets BudgetTokens", func(t *testing.T) {
 		settings := []v1alpha1.SwarmSettings{
 			{Spec: v1alpha1.SwarmSettingsSpec{Reasoning: &v1alpha1.ReasoningDefaults{
 				Mode: v1alpha1.ReasoningAuto,
@@ -109,97 +117,95 @@ var _ = Describe("mergeReasoningConfig", func() {
 			BudgetTokens: int32Ptr(2048),
 		}
 		out := mergeReasoningConfig(agent, settings)
-		Expect(out).NotTo(BeNil())
-		Expect(out.Mode).To(Equal(v1alpha1.ReasoningAuto))
-		Expect(out.BudgetTokens).NotTo(BeNil())
-		Expect(*out.BudgetTokens).To(Equal(int32(2048)))
+		if out == nil {
+			t.Fatal("expected non-nil output")
+		}
+		requireEqual(t, out.Mode, v1alpha1.ReasoningAuto)
+		if out.BudgetTokens == nil {
+			t.Fatal("expected non-nil BudgetTokens")
+		}
+		requireEqual(t, *out.BudgetTokens, int32(2048))
 	})
-})
+}
 
-var _ = Describe("reasoningConditionReason", func() {
-	// reasoningConditionReason no longer takes a model parameter.
-	// Model-name-based capability detection was removed: the operator trusts
-	// the user's mode: Auto/Explicit declaration. Provider-side conditions
-	// (IgnoredModelNotCapable, RejectedModelNotCapable, FieldIgnored) are
-	// set at runtime after the first LLM call, not at reconcile time.
-
-	Context("Disabled cases", func() {
-		It("returns Disabled when cfg is nil", func() {
+func TestReasoningConditionReason(t *testing.T) {
+	t.Run("Disabled cases", func(t *testing.T) {
+		t.Run("returns Disabled when cfg is nil", func(t *testing.T) {
 			reason, status := reasoningConditionReason(nil, nil)
-			Expect(reason).To(Equal(v1alpha1.ReasoningReasonDisabled))
-			Expect(status).To(Equal(metav1.ConditionFalse))
+			requireEqual(t, reason, v1alpha1.ReasoningReasonDisabled)
+			requireEqual(t, status, metav1.ConditionFalse)
 		})
-		It("returns Disabled when cfg.Mode == Disabled", func() {
+		t.Run("returns Disabled when cfg.Mode == Disabled", func(t *testing.T) {
 			cfg := &v1alpha1.ReasoningConfig{Mode: v1alpha1.ReasoningDisabled}
 			reason, status := reasoningConditionReason(cfg, nil)
-			Expect(reason).To(Equal(v1alpha1.ReasoningReasonDisabled))
-			Expect(status).To(Equal(metav1.ConditionFalse))
+			requireEqual(t, reason, v1alpha1.ReasoningReasonDisabled)
+			requireEqual(t, status, metav1.ConditionFalse)
 		})
-		It("returns Disabled when cfg.Mode is empty string", func() {
+		t.Run("returns Disabled when cfg.Mode is empty string", func(t *testing.T) {
 			cfg := &v1alpha1.ReasoningConfig{}
 			reason, status := reasoningConditionReason(cfg, nil)
-			Expect(reason).To(Equal(v1alpha1.ReasoningReasonDisabled))
-			Expect(status).To(Equal(metav1.ConditionFalse))
+			requireEqual(t, reason, v1alpha1.ReasoningReasonDisabled)
+			requireEqual(t, status, metav1.ConditionFalse)
 		})
 	})
 
-	Context("Active cases - trusts the user declaration", func() {
-		It("Auto mode -> Active regardless of model name", func() {
+	t.Run("Active cases - trusts the user declaration", func(t *testing.T) {
+		t.Run("Auto mode -> Active regardless of model name", func(t *testing.T) {
 			cfg := &v1alpha1.ReasoningConfig{Mode: v1alpha1.ReasoningAuto}
 			reason, status := reasoningConditionReason(cfg, nil)
-			Expect(reason).To(Equal(v1alpha1.ReasoningReasonActive))
-			Expect(status).To(Equal(metav1.ConditionTrue))
+			requireEqual(t, reason, v1alpha1.ReasoningReasonActive)
+			requireEqual(t, status, metav1.ConditionTrue)
 		})
-		It("Explicit mode -> Active regardless of model name", func() {
+		t.Run("Explicit mode -> Active regardless of model name", func(t *testing.T) {
 			cfg := &v1alpha1.ReasoningConfig{
 				Mode:         v1alpha1.ReasoningExplicit,
 				BudgetTokens: int32Ptr(4096),
 			}
 			reason, status := reasoningConditionReason(cfg, nil)
-			Expect(reason).To(Equal(v1alpha1.ReasoningReasonActive))
-			Expect(status).To(Equal(metav1.ConditionTrue))
+			requireEqual(t, reason, v1alpha1.ReasoningReasonActive)
+			requireEqual(t, status, metav1.ConditionTrue)
 		})
 	})
 
-	Context("ClampedByGuardrail cases", func() {
-		It("BudgetTokens=8192 > MaxThinking=4096 -> ClampedByGuardrail", func() {
+	t.Run("ClampedByGuardrail cases", func(t *testing.T) {
+		t.Run("BudgetTokens=8192 > MaxThinking=4096 -> ClampedByGuardrail", func(t *testing.T) {
 			cfg := &v1alpha1.ReasoningConfig{
 				Mode:         v1alpha1.ReasoningExplicit,
 				BudgetTokens: int32Ptr(8192),
 			}
 			limits := &v1alpha1.GuardrailLimits{MaxThinkingTokensPerCall: int32Ptr(4096)}
 			reason, status := reasoningConditionReason(cfg, limits)
-			Expect(reason).To(Equal(v1alpha1.ReasoningReasonClampedByGuardrail))
-			Expect(status).To(Equal(metav1.ConditionTrue))
+			requireEqual(t, reason, v1alpha1.ReasoningReasonClampedByGuardrail)
+			requireEqual(t, status, metav1.ConditionTrue)
 		})
 
-		It("BudgetTokens=8192 < MaxThinking=9999 -> Active (no clamp)", func() {
+		t.Run("BudgetTokens=8192 < MaxThinking=9999 -> Active (no clamp)", func(t *testing.T) {
 			cfg := &v1alpha1.ReasoningConfig{
 				Mode:         v1alpha1.ReasoningExplicit,
 				BudgetTokens: int32Ptr(8192),
 			}
 			limits := &v1alpha1.GuardrailLimits{MaxThinkingTokensPerCall: int32Ptr(9999)}
 			reason, status := reasoningConditionReason(cfg, limits)
-			Expect(reason).To(Equal(v1alpha1.ReasoningReasonActive))
-			Expect(status).To(Equal(metav1.ConditionTrue))
+			requireEqual(t, reason, v1alpha1.ReasoningReasonActive)
+			requireEqual(t, status, metav1.ConditionTrue)
 		})
 
-		It("no BudgetTokens with MaxThinking set -> Active (nothing to clamp)", func() {
+		t.Run("no BudgetTokens with MaxThinking set -> Active (nothing to clamp)", func(t *testing.T) {
 			cfg := &v1alpha1.ReasoningConfig{Mode: v1alpha1.ReasoningAuto}
 			limits := &v1alpha1.GuardrailLimits{MaxThinkingTokensPerCall: int32Ptr(4096)}
 			reason, status := reasoningConditionReason(cfg, limits)
-			Expect(reason).To(Equal(v1alpha1.ReasoningReasonActive))
-			Expect(status).To(Equal(metav1.ConditionTrue))
+			requireEqual(t, reason, v1alpha1.ReasoningReasonActive)
+			requireEqual(t, status, metav1.ConditionTrue)
 		})
 
-		It("nil limits -> Active (no guardrail to clamp against)", func() {
+		t.Run("nil limits -> Active (no guardrail to clamp against)", func(t *testing.T) {
 			cfg := &v1alpha1.ReasoningConfig{
 				Mode:         v1alpha1.ReasoningAuto,
 				BudgetTokens: int32Ptr(100000),
 			}
 			reason, status := reasoningConditionReason(cfg, nil)
-			Expect(reason).To(Equal(v1alpha1.ReasoningReasonActive))
-			Expect(status).To(Equal(metav1.ConditionTrue))
+			requireEqual(t, reason, v1alpha1.ReasoningReasonActive)
+			requireEqual(t, status, metav1.ConditionTrue)
 		})
 	})
-})
+}

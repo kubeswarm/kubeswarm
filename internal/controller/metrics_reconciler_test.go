@@ -19,10 +19,8 @@ package controller
 import (
 	"context"
 	"errors"
+	"testing"
 	"time"
-
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -40,46 +38,46 @@ func (f *fakeReconciler) Reconcile(_ context.Context, _ reconcile.Request) (ctrl
 	return f.result, f.err
 }
 
-var _ = Describe("reconcileResult", func() {
-	It("returns 'error' when err is set", func() {
-		Expect(reconcileResult(ctrl.Result{}, errors.New("boom"))).To(Equal("error"))
+func TestReconcileResult(t *testing.T) {
+	t.Run("returns 'error' when err is set", func(t *testing.T) {
+		requireEqual(t, reconcileResult(ctrl.Result{}, errors.New("boom")), "error")
 	})
 
-	It("returns 'requeue' when RequeueAfter > 0 and no error", func() {
-		Expect(reconcileResult(ctrl.Result{RequeueAfter: time.Second}, nil)).To(Equal("requeue"))
+	t.Run("returns 'requeue' when RequeueAfter > 0 and no error", func(t *testing.T) {
+		requireEqual(t, reconcileResult(ctrl.Result{RequeueAfter: time.Second}, nil), "requeue")
 	})
 
-	It("returns 'ok' for an empty result with no error", func() {
-		Expect(reconcileResult(ctrl.Result{}, nil)).To(Equal("ok"))
+	t.Run("returns 'ok' for an empty result with no error", func(t *testing.T) {
+		requireEqual(t, reconcileResult(ctrl.Result{}, nil), "ok")
 	})
 
-	It("returns 'error' even when RequeueAfter is set alongside an error", func() {
-		Expect(reconcileResult(ctrl.Result{RequeueAfter: time.Second}, errors.New("x"))).To(Equal("error"))
+	t.Run("returns 'error' even when RequeueAfter is set alongside an error", func(t *testing.T) {
+		requireEqual(t, reconcileResult(ctrl.Result{RequeueAfter: time.Second}, errors.New("x")), "error")
 	})
-})
+}
 
-var _ = Describe("WithMetrics", func() {
-	It("wraps the reconciler and forwards successful calls", func() {
+func TestWithMetrics(t *testing.T) {
+	t.Run("wraps the reconciler and forwards successful calls", func(t *testing.T) {
 		inner := &fakeReconciler{result: ctrl.Result{}}
 		wrapped := WithMetrics(inner, "test-controller")
 		result, err := wrapped.Reconcile(context.Background(), reconcile.Request{})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(result).To(Equal(ctrl.Result{}))
-		Expect(inner.called).To(BeTrue())
+		requireNoError(t, err)
+		requireEqual(t, result, ctrl.Result{})
+		requireTrue(t, inner.called)
 	})
 
-	It("propagates errors from the inner reconciler", func() {
+	t.Run("propagates errors from the inner reconciler", func(t *testing.T) {
 		inner := &fakeReconciler{err: errors.New("inner error")}
 		wrapped := WithMetrics(inner, "test-controller")
 		_, err := wrapped.Reconcile(context.Background(), reconcile.Request{})
-		Expect(err).To(MatchError("inner error"))
+		requireContains(t, err.Error(), "inner error")
 	})
 
-	It("forwards a requeue result from the inner reconciler", func() {
+	t.Run("forwards a requeue result from the inner reconciler", func(t *testing.T) {
 		inner := &fakeReconciler{result: ctrl.Result{RequeueAfter: 5 * time.Second}}
 		wrapped := WithMetrics(inner, "test-controller")
 		result, err := wrapped.Reconcile(context.Background(), reconcile.Request{})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(result.RequeueAfter).To(Equal(5 * time.Second))
+		requireNoError(t, err)
+		requireEqual(t, result.RequeueAfter, 5*time.Second)
 	})
-})
+}

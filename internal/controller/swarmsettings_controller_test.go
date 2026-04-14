@@ -18,9 +18,8 @@ package controller
 
 import (
 	"context"
+	"testing"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -29,7 +28,7 @@ import (
 	kubeswarmv1alpha1 "github.com/kubeswarm/kubeswarm/api/v1alpha1"
 )
 
-var _ = Describe("SwarmSettings Controller", func() {
+func TestSwarmSettingsController(t *testing.T) {
 	const (
 		resourceName = "test-swarmsettings"
 		namespace    = "default"
@@ -38,101 +37,114 @@ var _ = Describe("SwarmSettings Controller", func() {
 	ctx := context.Background()
 	namespacedName := types.NamespacedName{Name: resourceName, Namespace: namespace}
 
-	AfterEach(func() {
+	cleanupSettings := func(t *testing.T) {
+		t.Helper()
 		cfg := &kubeswarmv1alpha1.SwarmSettings{}
 		if err := k8sClient.Get(ctx, namespacedName, cfg); err == nil {
-			Expect(k8sClient.Delete(ctx, cfg)).To(Succeed())
+			requireNoError(t, k8sClient.Delete(ctx, cfg))
 		}
-	})
+	}
 
-	Context("When reconciling a minimal SwarmSettings", func() {
-		BeforeEach(func() {
-			By("creating an SwarmSettings with no spec fields set")
-			resource := &kubeswarmv1alpha1.SwarmSettings{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      resourceName,
-					Namespace: namespace,
+	createMinimalSettings := func(t *testing.T) {
+		t.Helper()
+		resource := &kubeswarmv1alpha1.SwarmSettings{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      resourceName,
+				Namespace: namespace,
+			},
+		}
+		requireNoError(t, k8sClient.Create(ctx, resource))
+	}
+
+	createSettingsWithSpec := func(t *testing.T) {
+		t.Helper()
+		resource := &kubeswarmv1alpha1.SwarmSettings{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      resourceName,
+				Namespace: namespace,
+			},
+			Spec: kubeswarmv1alpha1.SwarmSettingsSpec{
+				Temperature:   "0.7",
+				OutputFormat:  "structured-json",
+				MemoryBackend: kubeswarmv1alpha1.MemoryBackendInContext,
+				PromptFragments: &kubeswarmv1alpha1.PromptFragments{
+					Persona:     "You are an expert analyst.",
+					OutputRules: "Always cite your sources.",
 				},
-			}
-			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-		})
+			},
+		}
+		requireNoError(t, k8sClient.Create(ctx, resource))
+	}
 
-		It("should set Ready=True with reason Accepted", func() {
-			By("running the reconciler")
+	t.Run("When reconciling a minimal SwarmSettings", func(t *testing.T) {
+		t.Run("should set Ready=True with reason Accepted", func(t *testing.T) {
+			createMinimalSettings(t)
+			t.Cleanup(func() { cleanupSettings(t) })
+
 			r := &SwarmSettingsReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
+			requireNoError(t, err)
 
-			By("fetching the updated status")
 			cfg := &kubeswarmv1alpha1.SwarmSettings{}
-			Expect(k8sClient.Get(ctx, namespacedName, cfg)).To(Succeed())
+			requireNoError(t, k8sClient.Get(ctx, namespacedName, cfg))
 
 			cond := apimeta.FindStatusCondition(cfg.Status.Conditions, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-			Expect(cond.Reason).To(Equal("Accepted"))
+			if cond == nil {
+				t.Fatal("expected Ready condition, got nil")
+			}
+			requireEqual(t, cond.Status, metav1.ConditionTrue)
+			requireEqual(t, cond.Reason, "Accepted")
 		})
 
-		It("should set ObservedGeneration to match the resource generation", func() {
-			By("running the reconciler")
+		t.Run("should set ObservedGeneration to match the resource generation", func(t *testing.T) {
+			createMinimalSettings(t)
+			t.Cleanup(func() { cleanupSettings(t) })
+
 			r := &SwarmSettingsReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
+			requireNoError(t, err)
 
 			cfg := &kubeswarmv1alpha1.SwarmSettings{}
-			Expect(k8sClient.Get(ctx, namespacedName, cfg)).To(Succeed())
-			Expect(cfg.Status.ObservedGeneration).To(Equal(cfg.Generation))
+			requireNoError(t, k8sClient.Get(ctx, namespacedName, cfg))
+			requireEqual(t, cfg.Status.ObservedGeneration, cfg.Generation)
 		})
 	})
 
-	Context("When reconciling an SwarmSettings with spec values", func() {
-		BeforeEach(func() {
-			By("creating an SwarmSettings with temperature, outputFormat, and prompt fragments")
-			resource := &kubeswarmv1alpha1.SwarmSettings{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      resourceName,
-					Namespace: namespace,
-				},
-				Spec: kubeswarmv1alpha1.SwarmSettingsSpec{
-					Temperature:   "0.7",
-					OutputFormat:  "structured-json",
-					MemoryBackend: kubeswarmv1alpha1.MemoryBackendInContext,
-					PromptFragments: &kubeswarmv1alpha1.PromptFragments{
-						Persona:     "You are an expert analyst.",
-						OutputRules: "Always cite your sources.",
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-		})
+	t.Run("When reconciling an SwarmSettings with spec values", func(t *testing.T) {
+		t.Run("should set Ready=True regardless of which spec fields are set", func(t *testing.T) {
+			createSettingsWithSpec(t)
+			t.Cleanup(func() { cleanupSettings(t) })
 
-		It("should set Ready=True regardless of which spec fields are set", func() {
 			r := &SwarmSettingsReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
+			requireNoError(t, err)
 
 			cfg := &kubeswarmv1alpha1.SwarmSettings{}
-			Expect(k8sClient.Get(ctx, namespacedName, cfg)).To(Succeed())
+			requireNoError(t, k8sClient.Get(ctx, namespacedName, cfg))
 
 			cond := apimeta.FindStatusCondition(cfg.Status.Conditions, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			if cond == nil {
+				t.Fatal("expected Ready condition, got nil")
+			}
+			requireEqual(t, cond.Status, metav1.ConditionTrue)
 
-			By("verifying spec values are preserved unchanged")
-			Expect(cfg.Spec.Temperature).To(Equal("0.7"))
-			Expect(cfg.Spec.OutputFormat).To(Equal("structured-json"))
-			Expect(cfg.Spec.PromptFragments).NotTo(BeNil())
-			Expect(cfg.Spec.PromptFragments.Persona).To(Equal("You are an expert analyst."))
+			// Verify spec values are preserved unchanged.
+			requireEqual(t, cfg.Spec.Temperature, "0.7")
+			requireEqual(t, cfg.Spec.OutputFormat, "structured-json")
+			if cfg.Spec.PromptFragments == nil {
+				t.Fatal("expected non-nil PromptFragments")
+			}
+			requireEqual(t, cfg.Spec.PromptFragments.Persona, "You are an expert analyst.")
 		})
 	})
 
-	Context("When reconciling a nonexistent SwarmSettings", func() {
-		It("should return without error", func() {
+	t.Run("When reconciling a nonexistent SwarmSettings", func(t *testing.T) {
+		t.Run("should return without error", func(t *testing.T) {
 			r := &SwarmSettingsReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, err := r.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: "does-not-exist", Namespace: namespace},
 			})
-			Expect(err).NotTo(HaveOccurred())
+			requireNoError(t, err)
 		})
 	})
-})
+}

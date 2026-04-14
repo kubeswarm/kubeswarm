@@ -125,7 +125,7 @@ make test-controller
 make test-runtime
 ```
 
-Tests use [Ginkgo](https://onsi.github.io/ginkgo/) + [Gomega](https://onsi.github.io/gomega/).
+Tests use the standard `testing` package with `envtest` for controller integration tests.
 
 ## Code style
 

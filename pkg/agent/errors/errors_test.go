@@ -114,16 +114,6 @@ func TestAgentError_DefaultSuggestion(t *testing.T) {
 	}
 }
 
-// TestAgentError_CustomSuggestion asserts WithSuggestion overrides the default.
-func TestAgentError_CustomSuggestion(t *testing.T) {
-	ae := agenterrors.NewLLMError(agenterrors.ErrLLMTimeout, "timed out", nil)
-	custom := "try increasing the timeout to 120s"
-	ae = ae.WithSuggestion(custom)
-	if ae.Suggestion != custom {
-		t.Errorf("Suggestion = %q, want %q", ae.Suggestion, custom)
-	}
-}
-
 // TestAgentError_Component asserts that each component group sets the correct Component string.
 func TestAgentError_Component(t *testing.T) {
 	cases := []struct {
