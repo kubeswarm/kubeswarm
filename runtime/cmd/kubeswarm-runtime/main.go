@@ -44,9 +44,8 @@ import (
 	"github.com/kubeswarm/kubeswarm/pkg/costs"
 	"github.com/kubeswarm/kubeswarm/pkg/observability"
 
-	// Register built-in LLM providers and queue backends. These keep SDK deps
-	// out of the controller module. Activated by their init() functions.
-	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/artifacts/gcs"
+	// Register built-in LLM providers, queue backends, and artifact stores.
+	// These keep SDK deps out of the controller module. Activated by their init() functions.
 	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/artifacts/s3"
 	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/budget/redisstore"
 	_ "github.com/kubeswarm/kubeswarm/runtime/pkg/costs/redisstore"
@@ -411,7 +410,7 @@ func processTask(
 	}
 	slog.Info("spend check", "team_name", cfg.TeamName, "input", usage.InputTokens, "output", usage.OutputTokens)
 	if cfg.TeamName != "" && (usage.InputTokens > 0 || usage.OutputTokens > 0) {
-		costUSD := costs.Default().Cost(cfg.Model, usage.InputTokens, usage.OutputTokens)
+		costUSD := costs.Default().Cost(cfg.Model, usage.InputTokens, usage.OutputTokens, usage.ThinkingTokens)
 		spendEntry := costs.SpendEntry{
 			Timestamp:    time.Now(),
 			Namespace:    cfg.Namespace,
