@@ -950,7 +950,9 @@ func (r *SwarmRunReconciler) resolveStepQueue(
 	return r.openQueueURL(queueURL)
 }
 
-// agentQueueURL reads the queue URL annotation from an SwarmAgent.
+// agentQueueURL reads the queue URL annotation from a SwarmAgent.
+// For standalone agents (no team annotation), it computes a per-agent stream key
+// so the operator submits tasks to the same stream the agent pod polls.
 func (r *SwarmRunReconciler) agentQueueURL(ctx context.Context, namespace, agentName string) (string, error) {
 	if agentName == "" {
 		return "", nil
@@ -962,7 +964,24 @@ func (r *SwarmRunReconciler) agentQueueURL(ctx context.Context, namespace, agent
 		}
 		return "", err
 	}
-	return agent.Annotations[kubeswarmv1alpha1.AnnotationTeamQueueURL], nil
+	if queueURL, ok := agent.Annotations[kubeswarmv1alpha1.AnnotationTeamQueueURL]; ok && queueURL != "" {
+		return queueURL, nil
+	}
+	// Standalone agent: compute per-agent stream key matching what
+	// buildTeamEnvVars injects into the agent pod's TASK_QUEUE_URL.
+	return r.computeAgentQueueURL(namespace, agentName), nil
+}
+
+// computeAgentQueueURL builds the per-agent queue URL for standalone agents.
+func (r *SwarmRunReconciler) computeAgentQueueURL(namespace, agentName string) string {
+	base := r.AgentTaskQueueURL
+	if base == "" {
+		base = r.TaskQueueURL
+	}
+	if base == "" {
+		return ""
+	}
+	return appendStreamParam(base, namespace+"."+agentName)
 }
 
 // cachedAgentQueueURL wraps agentQueueURL with a per-reconcile cache to avoid

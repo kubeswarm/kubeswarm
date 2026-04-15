@@ -331,6 +331,11 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		requeueAfter = mcpRequeue
 	}
 
+	// 9b. Reconcile advisor connections: check targets, set status and condition (RFC-0048).
+	advisorStatuses, advisorCondition := reconcileAdvisorConnections(ctx, r.Client, swarmAgent)
+	swarmAgent.Status.AdvisorConnections = advisorStatuses
+	setCondition(&swarmAgent.Status.Conditions, swarmAgent.Generation, kubeswarmv1alpha1.ConditionAdvisorsReady, advisorCondition.Status, advisorCondition.Reason, advisorCondition.Message)
+
 	// 10. Reconcile KEDA ScaledObject when autoscaling is configured.
 	if err := r.reconcileKEDA(ctx, swarmAgent); err != nil {
 		logger.Error(err, "failed to reconcile KEDA ScaledObject")
@@ -1448,6 +1453,9 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 		})
 	}
 
+	// Inject advisor connection configs as JSON (RFC-0048).
+	envVars = append(envVars, buildAdvisorEnvVars(swarmAgent)...)
+
 	// Deduplicate: last occurrence wins. This prevents warnings when
 	// SWARM_AGENT_INJECT_TASK_QUEUE_URL and the team annotation both set TASK_QUEUE_URL.
 	seen := make(map[string]int, len(envVars))
@@ -1464,10 +1472,29 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 }
 
 // buildTeamEnvVars returns env vars derived from SwarmTeam annotations/labels.
+// For standalone agents (no team annotation), it builds a per-agent stream key
+// so that each agent polls its own Redis stream instead of the shared default.
 func buildTeamEnvVars(swarmAgent *kubeswarmv1alpha1.SwarmAgent) []corev1.EnvVar {
 	var out []corev1.EnvVar
 	if queueURL, ok := swarmAgent.Annotations[kubeswarmv1alpha1.AnnotationTeamQueueURL]; ok && queueURL != "" {
 		out = append(out, corev1.EnvVar{Name: "TASK_QUEUE_URL", Value: queueURL})
+	} else {
+		// Standalone agent: derive a per-agent stream key from the injected
+		// base URL so agents don't share the default "agent-tasks" stream.
+		// The actual base URL comes from SWARM_AGENT_INJECT_TASK_QUEUE_URL
+		// which is appended earlier; here we set only the stream-qualified
+		// override that will win during deduplication (last occurrence wins).
+		baseURL := os.Getenv("SWARM_AGENT_INJECT_TASK_QUEUE_URL")
+		if baseURL == "" {
+			baseURL = os.Getenv("TASK_QUEUE_URL")
+		}
+		if baseURL != "" {
+			streamKey := swarmAgent.Namespace + "." + swarmAgent.Name
+			out = append(out, corev1.EnvVar{
+				Name:  "TASK_QUEUE_URL",
+				Value: appendStreamParam(baseURL, streamKey),
+			})
+		}
 	}
 	if routes, ok := swarmAgent.Annotations[kubeswarmv1alpha1.AnnotationTeamRoutes]; ok && routes != "" {
 		out = append(out, corev1.EnvVar{Name: "AGENT_TEAM_ROUTES", Value: routes})

@@ -195,6 +195,11 @@ func (v *SwarmAgentPromptValidator) Handle(ctx context.Context, req admission.Re
 		}
 	}
 
+	// RFC-0048: validate advisor connections (self-ref, depth, tool name collisions).
+	if advisorErrs := ValidateAdvisorConnections(ctx, v.client, agent); len(advisorErrs) > 0 {
+		return admission.Denied(advisorErrs[0].Error())
+	}
+
 	// MCP security policy enforcement (RFC-0016 Phase 5).
 	// Load all SwarmSettings in the namespace and apply the strictest policy found.
 	if denied, reason := v.checkMCPPolicy(ctx, req.Namespace, agent); denied {

@@ -40,6 +40,10 @@ type TokenUsage struct {
 	// TotalTokens is InputTokens + OutputTokens + ThinkingTokens, provided for
 	// convenient display.
 	TotalTokens int64 `json:"totalTokens"`
+	// Model identifies which model generated this usage record.
+	// Populated for advisor calls to enable per-model cost attribution.
+	// +optional
+	Model string `json:"model,omitempty"`
 }
 
 // PipelineStepPhase describes the execution state of a single pipeline step.

@@ -65,9 +65,12 @@ spec:
                 description: Agents lists other SwarmAgent or registry capabilities
                   callable as tools via A2A.
                 items:
-                  description: |-
-                    AgentConnection defines another agent callable as a tool via A2A.
-                    Exactly one of agentRef or capabilityRef must be set.
+                  description: "AgentConnection defines another agent callable as
+                    a tool via A2A.\nExactly one of agentRef or capabilityRef must
+                    be set.\n\nConstraint matrix:\n\n\tC1: exactly one of agentRef
+                    or capabilityRef\n\tC2: advisor role requires agentRef and forbids
+                    capabilityRef\n\tC3: contextPropagation only valid with advisor
+                    role"
                   properties:
                     agentRef:
                       description: |-
@@ -102,6 +105,70 @@ spec:
                           type: string
                       type: object
                       x-kubernetes-map-type: atomic
+                    contextPropagation:
+                      description: |-
+                        ContextPropagation configures how conversation context is forwarded to
+                        an advisor agent. Only valid when role is "advisor".
+                      properties:
+                        excludeSystemPrompt:
+                          description: |-
+                            ExcludeSystemPrompt prevents the executor's system prompt from being
+                            included in the context sent to the advisor.
+                          type: boolean
+                        maxAdvisorTokensPerTask:
+                          default: 0
+                          description: |-
+                            MaxAdvisorTokensPerTask caps cumulative advisor input+output tokens
+                            across all calls to this advisor within one execution attempt.
+                            0 means no per-advisor limit (cost control deferred to SwarmBudget).
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        maxCallsPerTask:
+                          default: 3
+                          description: |-
+                            MaxCallsPerTask caps how many times the executor can consult this
+                            advisor in a single task execution attempt. The counter resets when
+                            the task queue retries the task (new attempt = new counter).
+                          format: int32
+                          maximum: 50
+                          minimum: 1
+                          type: integer
+                        maxContextBytes:
+                          default: 262144
+                          description: |-
+                            MaxContextBytes caps the serialised context payload. Oldest messages
+                            are dropped to fit. Default 256KB.
+                          format: int32
+                          maximum: 1048576
+                          minimum: 1024
+                          type: integer
+                        recentMessages:
+                          default: 20
+                          description: |-
+                            RecentMessages is the number of recent conversation entries from the
+                            executor's conversation to include in the advisor's context.
+                          format: int32
+                          maximum: 200
+                          minimum: 1
+                          type: integer
+                        timeoutSeconds:
+                          default: 60
+                          description: |-
+                            TimeoutSeconds is the wall-clock timeout for an individual advisor
+                            call, from initiation to final response byte.
+                          format: int32
+                          maximum: 300
+                          minimum: 5
+                          type: integer
+                        toolName:
+                          description: |-
+                            ToolName overrides the auto-generated tool name. When empty, the
+                            tool is named consult_<sanitised_name>.
+                          maxLength: 63
+                          pattern: ^[a-z][a-z0-9_]*$
+                          type: string
+                      type: object
                     instructions:
                       description: |-
                         Instructions is operational context injected into the agent's system prompt
@@ -112,6 +179,16 @@ spec:
                         Name is the local identifier for this agent connection.
                         Used in guardrails.tools allow/deny patterns: "<name>/<capability>".
                       minLength: 1
+                      type: string
+                    role:
+                      default: tool
+                      description: |-
+                        Role defines the operational mode. "tool" (default) behaves as today.
+                        "advisor" enables context propagation and auto-injects a consult_<name>
+                        tool into the executor's tool list.
+                      enum:
+                      - tool
+                      - advisor
                       type: string
                     trust:
                       description: |-
@@ -128,6 +205,10 @@ spec:
                   x-kubernetes-validations:
                   - message: exactly one of agentRef or capabilityRef must be set
                     rule: has(self.agentRef) != has(self.capabilityRef)
+                  - message: advisor role requires agentRef and forbids capabilityRef
+                    rule: self.role != 'advisor' || (has(self.agentRef) && !has(self.capabilityRef))
+                  - message: contextPropagation is only valid when role is advisor
+                    rule: '!has(self.contextPropagation) || self.role == ''advisor'''
                 maxItems: 50
                 type: array
                 x-kubernetes-list-map-keys:
@@ -1230,6 +1311,44 @@ spec:
           status:
             description: SwarmAgentStatus defines the observed state of SwarmAgent.
             properties:
+              advisorConnections:
+                description: AdvisorConnections reports the status of advisor-role
+                  agent connections.
+                items:
+                  description: AdvisorConnectionStatus reports the health of one advisor
+                    connection.
+                  properties:
+                    lastTransitionTime:
+                      description: LastTransitionTime is the last time Ready changed.
+                      format: date-time
+                      type: string
+                    name:
+                      description: Name matches the AgentConnection name.
+                      type: string
+                    ready:
+                      description: Ready indicates the advisor agent exists and has
+                        ready replicas.
+                      type: boolean
+                    toolInjected:
+                      description: |-
+                        ToolInjected indicates the consult_<name> tool was successfully
+                        added to the executor's tool list.
+                      type: boolean
+                    toolName:
+                      description: ToolName is the resolved tool name (consult_<name>
+                        or override).
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - name
+                  - ready
+                  - toolInjected
+                  - toolName
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               conditions:
                 description: Conditions reflect the current state of the SwarmAgent.
                 items:
@@ -1300,6 +1419,11 @@ spec:
                       sent to the LLM.
                     format: int64
                     type: integer
+                  model:
+                    description: |-
+                      Model identifies which model generated this usage record.
+                      Populated for advisor calls to enable per-model cost attribution.
+                    type: string
                   outputTokens:
                     description: |-
                       OutputTokens is the total number of final-answer/completion tokens generated

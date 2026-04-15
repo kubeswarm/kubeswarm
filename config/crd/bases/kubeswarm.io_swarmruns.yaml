@@ -1502,6 +1502,11 @@ spec:
                             tokens sent to the LLM.
                           format: int64
                           type: integer
+                        model:
+                          description: |-
+                            Model identifies which model generated this usage record.
+                            Populated for advisor calls to enable per-model cost attribution.
+                          type: string
                         outputTokens:
                           description: |-
                             OutputTokens is the total number of final-answer/completion tokens generated
@@ -1561,6 +1566,11 @@ spec:
                       sent to the LLM.
                     format: int64
                     type: integer
+                  model:
+                    description: |-
+                      Model identifies which model generated this usage record.
+                      Populated for advisor calls to enable per-model cost attribution.
+                    type: string
                   outputTokens:
                     description: |-
                       OutputTokens is the total number of final-answer/completion tokens generated
