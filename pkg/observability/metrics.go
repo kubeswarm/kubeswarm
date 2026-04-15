@@ -61,6 +61,11 @@ type AgentMetrics struct {
 	agentErrors metric.Int64Counter
 
 	circuitRejected metric.Int64Counter
+
+	// RFC-0048: advisor metrics.
+	advisorCalls    metric.Int64Counter
+	advisorDuration metric.Int64Histogram
+	advisorErrors   metric.Int64Counter
 }
 
 // NewAgentMetrics creates and registers all agent runtime instruments.
@@ -160,6 +165,20 @@ func NewAgentMetrics() (*AgentMetrics, error) {
 	}
 	if am.circuitRejected, err = m.Int64Counter("kubeswarm.circuit.rejected",
 		metric.WithDescription("Calls rejected by the circuit breaker")); err != nil {
+		return nil, err
+	}
+
+	// RFC-0048: advisor metrics.
+	if am.advisorCalls, err = m.Int64Counter("kubeswarm.advisor.calls",
+		metric.WithDescription("Advisor consultation calls")); err != nil {
+		return nil, err
+	}
+	if am.advisorDuration, err = m.Int64Histogram("kubeswarm.advisor.duration_ms",
+		metric.WithDescription("Advisor call duration in milliseconds")); err != nil {
+		return nil, err
+	}
+	if am.advisorErrors, err = m.Int64Counter("kubeswarm.advisor.errors",
+		metric.WithDescription("Advisor calls that returned errors")); err != nil {
 		return nil, err
 	}
 
@@ -285,6 +304,15 @@ func (am *AgentMetrics) RecordMCPCallError(ctx context.Context, attrs ...attribu
 // RecordDelegate increments the delegate submission counter.
 func (am *AgentMetrics) RecordDelegate(ctx context.Context, attrs ...attribute.KeyValue) {
 	am.delegateSubmitted.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordAdvisorCall records an advisor consultation call (RFC-0048).
+func (am *AgentMetrics) RecordAdvisorCall(ctx context.Context, since time.Time, failed bool, attrs ...attribute.KeyValue) {
+	am.advisorCalls.Add(ctx, 1, metric.WithAttributes(attrs...))
+	am.advisorDuration.Record(ctx, time.Since(since).Milliseconds(), metric.WithAttributes(attrs...))
+	if failed {
+		am.advisorErrors.Add(ctx, 1, metric.WithAttributes(attrs...))
+	}
 }
 
 // RecordToolRefresh increments the MCP tool list refresh counter.

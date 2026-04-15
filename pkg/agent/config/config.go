@@ -143,6 +143,21 @@ type WebhookToolConfig struct {
 	InputSchema string `json:"inputSchema"`
 }
 
+// AdvisorConfig holds the runtime configuration for one advisor connection (RFC-0048).
+// Injected by the operator as AGENT_ADVISORS (JSON array).
+type AdvisorConfig struct {
+	Name                    string `json:"name"`
+	ToolName                string `json:"toolName"`
+	AgentRef                string `json:"agentRef"`
+	RecentMessages          int32  `json:"recentMessages"`
+	MaxCallsPerTask         int32  `json:"maxCallsPerTask"`
+	TimeoutSeconds          int32  `json:"timeoutSeconds"`
+	MaxAdvisorTokensPerTask int32  `json:"maxAdvisorTokensPerTask"`
+	MaxContextBytes         int32  `json:"maxContextBytes"`
+	ExcludeSystemPrompt     bool   `json:"excludeSystemPrompt"`
+	Instructions            string `json:"instructions,omitempty"`
+}
+
 // Config holds all runtime configuration for an agent pod.
 // All fields are populated from environment variables injected by the operator.
 // Provider-specific credentials (e.g. ANTHROPIC_API_KEY) are read directly
@@ -242,6 +257,10 @@ type Config struct {
 	// Injected by the operator as AGENT_AUDIT_LOG (JSON) from the resolved audit config.
 	// Nil when audit logging is disabled (mode=off or unset).
 	AuditLog *AuditLogConfig
+	// Advisors is the list of advisor connections for this agent (RFC-0048).
+	// Injected by the operator as AGENT_ADVISORS (JSON array).
+	// Nil when the agent has no advisor connections.
+	Advisors []AdvisorConfig
 }
 
 // Load reads agent configuration from environment variables.
@@ -337,6 +356,15 @@ func Load() (*Config, error) {
 	}
 
 	cfg.PolicyForceTrustLevel = os.Getenv("AGENT_POLICY_FORCE_TRUST_LEVEL")
+
+	// Parse advisor connections (RFC-0048).
+	if v := os.Getenv("AGENT_ADVISORS"); v != "" {
+		var advisors []AdvisorConfig
+		if err := json.Unmarshal([]byte(v), &advisors); err != nil {
+			return nil, agenterrors.NewConfigError(agenterrors.ErrConfigInvalid, "invalid AGENT_ADVISORS JSON", err)
+		}
+		cfg.Advisors = advisors
+	}
 
 	return cfg, nil
 }

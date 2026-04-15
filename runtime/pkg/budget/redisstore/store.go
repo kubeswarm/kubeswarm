@@ -23,6 +23,7 @@ package redisstore
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -36,8 +37,11 @@ func init() {
 	budget.RegisterStore("rediss", factory)
 }
 
-func factory(url string, limit int64, namespace, agentName string) (budget.Store, error) {
-	opts, err := redisclient.ParseURL(url)
+func factory(rawURL string, limit int64, namespace, agentName string) (budget.Store, error) {
+	// Strip the custom "stream" query parameter (used by the task queue) before
+	// passing to the Redis client which only understands standard Redis URL params.
+	cleanURL := stripStreamParam(rawURL)
+	opts, err := redisclient.ParseURL(cleanURL)
 	if err != nil {
 		return nil, fmt.Errorf("budget: parse redis URL: %w", err)
 	}
@@ -117,4 +121,21 @@ func (s *redisStore) Record(ctx context.Context, taskID string, totalTokens int6
 // Close releases the Redis connection.
 func (s *redisStore) Close() error {
 	return s.client.Close()
+}
+
+// stripStreamParam removes the custom "stream" query parameter from a Redis URL.
+// The task queue appends ?stream=<key> to route to per-agent streams, but the
+// Redis client library does not recognise it and returns a parse error.
+func stripStreamParam(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	q := u.Query()
+	if !q.Has("stream") {
+		return rawURL
+	}
+	q.Del("stream")
+	u.RawQuery = q.Encode()
+	return u.String()
 }

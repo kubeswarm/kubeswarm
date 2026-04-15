@@ -204,9 +204,89 @@ type AgentTools struct {
 // A2A (agent-to-agent) types
 // -----------------------------------------------------------------------------
 
+// AgentConnectionRole defines the operational mode of an agent connection.
+// "tool" (default): the agent is exposed as regular MCP tools, same as today.
+// "advisor": enables context propagation and auto-injects a consult_<name>
+// tool into the executor's tool list.
+// +kubebuilder:validation:Enum=tool;advisor
+type AgentConnectionRole string
+
+const (
+	// AgentConnectionRoleTool is the default mode - the agent is exposed as regular MCP tools.
+	AgentConnectionRoleTool AgentConnectionRole = "tool"
+	// AgentConnectionRoleAdvisor enables context propagation and auto-injects a consult_<name> tool.
+	AgentConnectionRoleAdvisor AgentConnectionRole = "advisor"
+)
+
+// ContextPropagationConfig controls how conversation context is forwarded
+// to an advisor agent.
+type ContextPropagationConfig struct {
+	// RecentMessages is the number of recent conversation entries from the
+	// executor's conversation to include in the advisor's context.
+	// +kubebuilder:default=20
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=200
+	// +optional
+	RecentMessages int32 `json:"recentMessages,omitempty"`
+
+	// MaxCallsPerTask caps how many times the executor can consult this
+	// advisor in a single task execution attempt. The counter resets when
+	// the task queue retries the task (new attempt = new counter).
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=50
+	// +optional
+	MaxCallsPerTask int32 `json:"maxCallsPerTask,omitempty"`
+
+	// TimeoutSeconds is the wall-clock timeout for an individual advisor
+	// call, from initiation to final response byte.
+	// +kubebuilder:default=60
+	// +kubebuilder:validation:Minimum=5
+	// +kubebuilder:validation:Maximum=300
+	// +optional
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+
+	// MaxAdvisorTokensPerTask caps cumulative advisor input+output tokens
+	// across all calls to this advisor within one execution attempt.
+	// 0 means no per-advisor limit (cost control deferred to SwarmBudget).
+	// +kubebuilder:default=0
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxAdvisorTokensPerTask int32 `json:"maxAdvisorTokensPerTask,omitempty"`
+
+	// MaxContextBytes caps the serialised context payload. Oldest messages
+	// are dropped to fit. Default 256KB.
+	// +kubebuilder:default=262144
+	// +kubebuilder:validation:Minimum=1024
+	// +kubebuilder:validation:Maximum=1048576
+	// +optional
+	MaxContextBytes int32 `json:"maxContextBytes,omitempty"`
+
+	// ExcludeSystemPrompt prevents the executor's system prompt from being
+	// included in the context sent to the advisor.
+	// +optional
+	ExcludeSystemPrompt bool `json:"excludeSystemPrompt,omitempty"`
+
+	// ToolName overrides the auto-generated tool name. When empty, the
+	// tool is named consult_<sanitised_name>.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9_]*$`
+	// +optional
+	ToolName string `json:"toolName,omitempty"`
+}
+
 // AgentConnection defines another agent callable as a tool via A2A.
 // Exactly one of agentRef or capabilityRef must be set.
+//
+// Constraint matrix:
+//
+//	C1: exactly one of agentRef or capabilityRef
+//	C2: advisor role requires agentRef and forbids capabilityRef
+//	C3: contextPropagation only valid with advisor role
+//
 // +kubebuilder:validation:XValidation:rule="has(self.agentRef) != has(self.capabilityRef)",message="exactly one of agentRef or capabilityRef must be set"
+// +kubebuilder:validation:XValidation:rule="self.role != 'advisor' || (has(self.agentRef) && !has(self.capabilityRef))",message="advisor role requires agentRef and forbids capabilityRef"
+// +kubebuilder:validation:XValidation:rule="!has(self.contextPropagation) || self.role == 'advisor'",message="contextPropagation is only valid when role is advisor"
 type AgentConnection struct {
 	// Name is the local identifier for this agent connection.
 	// Used in guardrails.tools allow/deny patterns: "<name>/<capability>".
@@ -234,6 +314,18 @@ type AgentConnection struct {
 	// for calls to this agent. Use to constrain scope or set expectations.
 	// +optional
 	Instructions string `json:"instructions,omitempty"`
+
+	// Role defines the operational mode. "tool" (default) behaves as today.
+	// "advisor" enables context propagation and auto-injects a consult_<name>
+	// tool into the executor's tool list.
+	// +kubebuilder:default=tool
+	// +optional
+	Role AgentConnectionRole `json:"role,omitempty"`
+
+	// ContextPropagation configures how conversation context is forwarded to
+	// an advisor agent. Only valid when role is "advisor".
+	// +optional
+	ContextPropagation *ContextPropagationConfig `json:"contextPropagation,omitempty"`
 }
 
 // -----------------------------------------------------------------------------
@@ -905,6 +997,30 @@ type SwarmAgentMCPStatus struct {
 // ConditionQueueReady indicates the agent can connect to its task queue.
 const ConditionQueueReady = "QueueReady"
 
+// ConditionAdvisorsReady indicates whether all advisor connections are resolved
+// and tool-injected. True when all advisors have ready replicas. False with
+// reason AdvisorNotFound or AdvisorNoReplicas when any advisor has issues.
+const ConditionAdvisorsReady = "AdvisorsReady"
+
+// AdvisorConnectionStatus reports the health of one advisor connection.
+type AdvisorConnectionStatus struct {
+	// Name matches the AgentConnection name.
+	Name string `json:"name"`
+
+	// Ready indicates the advisor agent exists and has ready replicas.
+	Ready bool `json:"ready"`
+
+	// ToolInjected indicates the consult_<name> tool was successfully
+	// added to the executor's tool list.
+	ToolInjected bool `json:"toolInjected"`
+
+	// ToolName is the resolved tool name (consult_<name> or override).
+	ToolName string `json:"toolName"`
+
+	// LastTransitionTime is the last time Ready changed.
+	LastTransitionTime metav1.Time `json:"lastTransitionTime"`
+}
+
 // ConditionMCPHealthy indicates the health of MCP tool servers used by the agent.
 // Reasons: AllHealthy, Degraded, Unreachable.
 const ConditionMCPHealthy = "MCPHealthy"
@@ -938,6 +1054,11 @@ type SwarmAgentStatus struct {
 	// +optional
 	// +kubebuilder:validation:MaxItems=100
 	ExposedMCPCapabilities []string `json:"exposedMCPCapabilities,omitempty"`
+	// AdvisorConnections reports the status of advisor-role agent connections.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	AdvisorConnections []AdvisorConnectionStatus `json:"advisorConnections,omitempty"`
 	// Conditions reflect the current state of the SwarmAgent.
 	// +listType=map
 	// +listMapKey=type

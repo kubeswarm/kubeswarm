@@ -78,6 +78,7 @@ type Runner struct {
 	delegateQueues map[string]queue.TaskQueue // role → queue; nil = not in a team
 	allTools       []mcp.Tool
 	webhookToolMap map[string]config.WebhookToolConfig // keyed by tool name for O(1) lookup
+	advisorTracker *advisorTracker                     // nil when no advisors configured (RFC-0048)
 	metrics        *observability.AgentMetrics
 	metricAttrs    []attribute.KeyValue // namespace/agent/role label set
 	k8sEvents      *observability.AgentEventRecorder
@@ -109,6 +110,10 @@ func New(cfg *config.Config, mcpManager *mcp.Manager, provider providers.LLMProv
 	if cfg.LoopPolicy != nil {
 		r.loopDedup = cfg.LoopPolicy.Dedup
 	}
+	// RFC-0048: wire advisor tools and tracker.
+	if len(cfg.Advisors) > 0 {
+		r.advisorTracker = newAdvisorTracker(cfg.Advisors)
+	}
 	return r
 }
 
@@ -129,6 +134,9 @@ func (r *Runner) buildTools() {
 			// ServerURL left blank - CallTool handles these by name via cfg.WebhookTools.
 		})
 	}
+
+	// RFC-0048: advisor tools injected from AGENT_ADVISORS config.
+	r.allTools = append(r.allTools, buildAdvisorTools(r.cfg.Advisors)...)
 
 	// Built-in: submit_subtask - only available when the task queue is wired in.
 	if r.taskQueue != nil {
@@ -213,6 +221,8 @@ func (r *Runner) CallTool(ctx context.Context, toolName string, input json.RawMe
 	toolType := toolTypeMCP
 	if toolName == submitSubtaskTool || toolName == delegateTool || toolName == collectResultsTool || toolName == spawnAndCollectTool {
 		toolType = toolTypeBuiltin
+	} else if r.isAdvisorTool(toolName) {
+		toolType = toolTypeAdvisor
 	} else if r.isWebhookTool(toolName) {
 		toolType = toolTypeWebhook
 	}
@@ -301,7 +311,22 @@ func (r *Runner) isWebhookTool(name string) bool {
 	return ok
 }
 
+func (r *Runner) isAdvisorTool(name string) bool {
+	if r.advisorTracker == nil {
+		return false
+	}
+	_, ok := r.advisorTracker.isAdvisorTool(name)
+	return ok
+}
+
 func (r *Runner) callToolInner(ctx context.Context, toolName string, input json.RawMessage) (string, error) {
+	// RFC-0048: advisor tool dispatch.
+	if r.advisorTracker != nil {
+		if _, ok := r.advisorTracker.isAdvisorTool(toolName); ok {
+			return r.callAdvisor(ctx, toolName, input, r.advisorTracker)
+		}
+	}
+
 	// Built-in: supervisor/worker sub-task submission.
 	if toolName == submitSubtaskTool && r.taskQueue != nil {
 		var args struct {
