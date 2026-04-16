@@ -914,6 +914,28 @@ spec:
                       description: Runtime groups replica count, autoscaling, and
                         resources for an inline role.
                       properties:
+                        artifacts:
+                          description: Artifacts configures automatic artifact saving
+                            for completed tasks.
+                          properties:
+                            format:
+                              default: text
+                              description: Format controls the file extension and
+                                content type of the saved output.
+                              enum:
+                              - text
+                              - json
+                              - markdown
+                              - yaml
+                              type: string
+                            saveOutput:
+                              description: |-
+                                SaveOutput automatically writes the task's final output to the artifact
+                                directory after each task completes. The file is named "output" with the
+                                extension determined by Format (e.g. output.txt, output.json).
+                                collectArtifacts then uploads it to the configured artifact store.
+                              type: boolean
+                          type: object
                         autoscaling:
                           description: |-
                             Autoscaling configures KEDA-based autoscaling. When set, replicas is ignored.

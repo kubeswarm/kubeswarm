@@ -673,6 +673,10 @@ type AgentRuntime struct {
 	// +optional
 	Loop *AgentLoopPolicy `json:"loop,omitempty"`
 
+	// Artifacts configures automatic artifact saving for completed tasks.
+	// +optional
+	Artifacts *AgentArtifactsConfig `json:"artifacts,omitempty"`
+
 	// DrainTimeoutSeconds is the time to wait for in-flight tasks to complete during
 	// pod shutdown (rolling update, scale-down). Maps to terminationGracePeriodSeconds
 	// on the generated pod spec. Should be >= guardrails.limits.timeoutSeconds.
@@ -682,6 +686,40 @@ type AgentRuntime struct {
 	// +kubebuilder:validation:Maximum=600
 	// +optional
 	DrainTimeoutSeconds *int64 `json:"drainTimeoutSeconds,omitempty"`
+}
+
+// ArtifactFormat identifies the output format for saved artifacts.
+// +kubebuilder:validation:Enum=text;json;markdown;yaml
+type ArtifactFormat string
+
+const (
+	ArtifactFormatText     ArtifactFormat = "text"
+	ArtifactFormatJSON     ArtifactFormat = "json"
+	ArtifactFormatMarkdown ArtifactFormat = "markdown"
+	ArtifactFormatYAML     ArtifactFormat = "yaml"
+)
+
+// ArtifactFormatExtension maps each format to its file extension.
+var ArtifactFormatExtension = map[ArtifactFormat]string{
+	ArtifactFormatText:     ".txt",
+	ArtifactFormatJSON:     ".json",
+	ArtifactFormatMarkdown: ".md",
+	ArtifactFormatYAML:     ".yaml",
+}
+
+// AgentArtifactsConfig controls automatic artifact saving for completed tasks.
+type AgentArtifactsConfig struct {
+	// SaveOutput automatically writes the task's final output to the artifact
+	// directory after each task completes. The file is named "output" with the
+	// extension determined by Format (e.g. output.txt, output.json).
+	// collectArtifacts then uploads it to the configured artifact store.
+	// +optional
+	SaveOutput bool `json:"saveOutput,omitempty"`
+
+	// Format controls the file extension and content type of the saved output.
+	// +kubebuilder:default=text
+	// +optional
+	Format ArtifactFormat `json:"format,omitempty"`
 }
 
 // -----------------------------------------------------------------------------
@@ -894,6 +932,13 @@ type AgentObservability struct {
 	// When set, overrides namespace (SwarmSettings) and cluster (Helm) audit config.
 	// +optional
 	AuditLog *AuditLogConfig `json:"auditLog,omitempty"`
+
+	// NotifyRef references a SwarmNotify policy for this agent's notifications.
+	// Covers both health degradation alerts (AgentDegraded) and run completion
+	// notifications (TeamSucceeded/TeamFailed) for standalone agent runs.
+	// Takes precedence over healthCheck.notifyRef when both are set.
+	// +optional
+	NotifyRef *corev1.LocalObjectReference `json:"notifyRef,omitempty"`
 }
 
 // -----------------------------------------------------------------------------
@@ -974,6 +1019,16 @@ type SwarmAgentSpec struct {
 	// Observability groups health check, logging, and metrics configuration.
 	// +optional
 	Observability *AgentObservability `json:"observability,omitempty"`
+
+	// --- Gateway: how the agent routes to other agents (RFC-0052) ---
+
+	// Gateway configures this agent as a gateway to the swarm.
+	// When set, the operator injects registry_search and dispatch tools
+	// and adds a GatewayReady condition to status.
+	// Mutually exclusive with being an inline role in a SwarmTeam
+	// (enforced by admission webhook).
+	// +optional
+	Gateway *GatewayConfig `json:"gateway,omitempty"`
 }
 
 // SwarmAgentMCPStatus reports the last observed health of one MCP server.
@@ -992,6 +1047,15 @@ type SwarmAgentMCPStatus struct {
 	// LastCheck is when the probe was last run.
 	// +optional
 	LastCheck *metav1.Time `json:"lastCheck,omitempty"`
+	// AuthType reports what authentication the controller configured for this
+	// server: "none", "bearer", or "mtls". Empty means not yet evaluated.
+	// +optional
+	// +kubebuilder:validation:Enum=none;bearer;mtls
+	AuthType string `json:"authType,omitempty"`
+	// Trust is the trust level assigned to this MCP server.
+	// Mirrors spec for observability - confirms the controller applied it.
+	// +optional
+	Trust ToolTrustLevel `json:"trust,omitempty"`
 }
 
 // ConditionQueueReady indicates the agent can connect to its task queue.
@@ -1021,9 +1085,163 @@ type AdvisorConnectionStatus struct {
 	LastTransitionTime metav1.Time `json:"lastTransitionTime"`
 }
 
+// ToolAgentConnectionStatus reports the status of one tool-role agent connection.
+type ToolAgentConnectionStatus struct {
+	// Name matches the AgentConnection name.
+	Name string `json:"name"`
+	// Ready indicates the target agent exists and has ready replicas.
+	Ready bool `json:"ready"`
+	// Trust is the trust level assigned to this connection.
+	// +optional
+	Trust ToolTrustLevel `json:"trust,omitempty"`
+	// LastTransitionTime is the last time Ready changed.
+	LastTransitionTime metav1.Time `json:"lastTransitionTime"`
+}
+
 // ConditionMCPHealthy indicates the health of MCP tool servers used by the agent.
 // Reasons: AllHealthy, Degraded, Unreachable.
 const ConditionMCPHealthy = "MCPHealthy"
+
+// -----------------------------------------------------------------------------
+// Gateway types (RFC-0052)
+// -----------------------------------------------------------------------------
+
+// ConditionGatewayReady indicates the gateway is configured, registry is
+// reachable, and tools are injected.
+const ConditionGatewayReady = "GatewayReady"
+
+// GatewayDispatchMode controls whether a gateway agent can dispatch work.
+// +kubebuilder:validation:Enum=enabled;disabled
+type GatewayDispatchMode string
+
+const (
+	// GatewayDispatchEnabled injects both registry_search and dispatch tools.
+	GatewayDispatchEnabled GatewayDispatchMode = "enabled"
+	// GatewayDispatchDisabled injects only registry_search (search-only gateway).
+	GatewayDispatchDisabled GatewayDispatchMode = "disabled"
+)
+
+// GatewayFallbackMode controls behavior when no capability matches a user's request.
+// +kubebuilder:validation:Enum=fail;answer-directly;agent
+type GatewayFallbackMode string
+
+const (
+	// GatewayFallbackFail returns an error to the caller.
+	GatewayFallbackFail GatewayFallbackMode = "fail"
+	// GatewayFallbackAnswerDirectly lets the gateway respond using its own model.
+	GatewayFallbackAnswerDirectly GatewayFallbackMode = "answer-directly"
+	// GatewayFallbackAgent dispatches to a specific fallback agent.
+	GatewayFallbackAgent GatewayFallbackMode = "agent"
+)
+
+// GatewayFallback controls behavior when no capability matches the user's request.
+// +kubebuilder:validation:XValidation:rule="self.mode != 'agent' || has(self.agentRef)",message="agentRef is required when fallback mode is 'agent'"
+type GatewayFallback struct {
+	// Mode determines the fallback behavior.
+	// +kubebuilder:default="answer-directly"
+	Mode GatewayFallbackMode `json:"mode,omitempty"`
+
+	// AgentRef names the fallback agent to dispatch to when Mode is "agent".
+	// Required when Mode is "agent", ignored otherwise.
+	// +optional
+	AgentRef *corev1.LocalObjectReference `json:"agentRef,omitempty"`
+}
+
+// GatewayConfig controls the scope and behavior of a gateway agent.
+type GatewayConfig struct {
+	// RegistryRef names the SwarmRegistry to query for capability discovery.
+	// Required. The registry's spec.scope controls whether discovery is
+	// namespace-scoped or cluster-wide.
+	// +kubebuilder:validation:Required
+	RegistryRef corev1.LocalObjectReference `json:"registryRef"`
+
+	// FilterByTags filters discovery to capabilities matching ALL listed tags.
+	// Empty means no tag filtering - all capabilities in the registry are visible.
+	// Filters by AgentCapability.Tags values, not capability IDs.
+	// +optional
+	// +kubebuilder:validation:MaxItems=50
+	FilterByTags []string `json:"filterByTags,omitempty"`
+
+	// DispatchMode controls whether the gateway can dispatch work to other agents.
+	// "enabled" (default): registry_search and dispatch tools are both injected.
+	// "disabled": only registry_search is injected; the gateway can search but not dispatch.
+	// +kubebuilder:default="enabled"
+	// +optional
+	DispatchMode GatewayDispatchMode `json:"dispatchMode,omitempty"`
+
+	// DispatchTimeoutSeconds is the maximum time the gateway will wait for
+	// a single dispatched task to complete.
+	// +kubebuilder:default=120
+	// +kubebuilder:validation:Minimum=10
+	// +kubebuilder:validation:Maximum=3600
+	// +optional
+	DispatchTimeoutSeconds int32 `json:"dispatchTimeoutSeconds,omitempty"`
+
+	// MaxDispatchDepth is the maximum dispatch chain depth per task.
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10
+	// +optional
+	MaxDispatchDepth int32 `json:"maxDispatchDepth,omitempty"`
+
+	// MaxResultsPerSearch caps how many capabilities registry_search returns
+	// to the LLM per call.
+	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=50
+	// +optional
+	MaxResultsPerSearch int32 `json:"maxResultsPerSearch,omitempty"`
+
+	// MaxDispatchCalls caps how many times the LLM can call dispatch in a single task.
+	// +kubebuilder:default=5
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=20
+	// +optional
+	MaxDispatchCalls int32 `json:"maxDispatchCalls,omitempty"`
+
+	// MaxSearchCalls caps how many times the LLM can call registry_search in a single task.
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=20
+	// +optional
+	MaxSearchCalls int32 `json:"maxSearchCalls,omitempty"`
+
+	// Fallback controls what happens when no capability matches.
+	// When nil, defaults to answer-directly behavior.
+	// +optional
+	Fallback *GatewayFallback `json:"fallback,omitempty"`
+
+	// AllowedTargets restricts which agents the gateway can dispatch to.
+	// Entries are SwarmAgent names. When empty, all non-gateway agents
+	// discoverable via the registry are allowed.
+	// +optional
+	// +kubebuilder:validation:MaxItems=100
+	AllowedTargets []string `json:"allowedTargets,omitempty"`
+
+	// AllowGatewayTargets permits dispatching to other gateway agents.
+	// When false (default), the operator excludes agents with spec.gateway
+	// set from the capability list.
+	// +kubebuilder:default=false
+	// +optional
+	AllowGatewayTargets bool `json:"allowGatewayTargets,omitempty"`
+}
+
+// GatewayStatus reports gateway-specific observable state beyond conditions.
+type GatewayStatus struct {
+	// RoutableCapabilities is the count of capabilities injected into the
+	// gateway pod after tag filtering, readiness checks, and the 50-entry cap.
+	// +optional
+	RoutableCapabilities int32 `json:"routableCapabilities,omitempty"`
+
+	// TotalMatchingCapabilities is the count before the 50-entry cap.
+	// +optional
+	TotalMatchingCapabilities int32 `json:"totalMatchingCapabilities,omitempty"`
+
+	// LastCapabilitySync is the time the operator last updated the
+	// gateway's capability list.
+	// +optional
+	LastCapabilitySync *metav1.Time `json:"lastCapabilitySync,omitempty"`
+}
 
 // SwarmAgentStatus defines the observed state of SwarmAgent.
 type SwarmAgentStatus struct {
@@ -1041,6 +1259,9 @@ type SwarmAgentStatus struct {
 	// Populated only when guardrails.limits.dailyTokens is set.
 	// +optional
 	DailyTokenUsage *TokenUsage `json:"dailyTokenUsage,omitempty"`
+	// DedupEnabled surfaces whether tool-call deduplication is active for this agent.
+	// +optional
+	DedupEnabled bool `json:"dedupEnabled,omitempty"`
 	// ToolConnections reports the last observed connectivity state of each configured MCP server.
 	// +optional
 	// +listType=map
@@ -1054,11 +1275,31 @@ type SwarmAgentStatus struct {
 	// +optional
 	// +kubebuilder:validation:MaxItems=100
 	ExposedMCPCapabilities []string `json:"exposedMCPCapabilities,omitempty"`
+	// ToolAgentConnections reports the status of tool-role agent connections.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	ToolAgentConnections []ToolAgentConnectionStatus `json:"toolAgentConnections,omitempty"`
 	// AdvisorConnections reports the status of advisor-role agent connections.
 	// +listType=map
 	// +listMapKey=name
 	// +optional
 	AdvisorConnections []AdvisorConnectionStatus `json:"advisorConnections,omitempty"`
+	// AppliedSettings lists the names of SwarmSettings objects that were
+	// successfully resolved and composed into this agent's configuration.
+	// Empty when no settingsRefs are configured.
+	// +listType=set
+	// +optional
+	AppliedSettings []string `json:"appliedSettings,omitempty"`
+	// AppliedFragmentCount is the number of prompt fragments composed into
+	// the system prompt from all applied SwarmSettings. Zero when no
+	// fragments are configured or no settings are referenced.
+	// +optional
+	AppliedFragmentCount int `json:"appliedFragmentCount,omitempty"`
+	// Gateway reports gateway-specific observable state.
+	// Only populated when spec.gateway is set.
+	// +optional
+	Gateway *GatewayStatus `json:"gateway,omitempty"`
 	// Conditions reflect the current state of the SwarmAgent.
 	// +listType=map
 	// +listMapKey=type
@@ -1072,6 +1313,7 @@ type SwarmAgentStatus struct {
 // +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.spec.runtime.replicas`
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
 // +kubebuilder:printcolumn:name="Tokens(24h)",type=integer,JSONPath=`.status.dailyTokenUsage.totalTokens`,priority=1
+// +kubebuilder:printcolumn:name="Gateway",type=string,JSONPath=`.status.conditions[?(@.type=="GatewayReady")].status`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:resource:scope=Namespaced,shortName={swagent,swagents},categories=kubeswarm
 
