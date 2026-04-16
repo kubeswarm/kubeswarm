@@ -34,11 +34,11 @@ import (
 	"github.com/kubeswarm/kubeswarm/internal/registry"
 )
 
-// SwarmRegistryReconciler reconciles SwarmRegistry objects.
-//
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmregistries,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmregistries/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmregistries/finalizers,verbs=update
+
+// SwarmRegistryReconciler reconciles SwarmRegistry objects.
 type SwarmRegistryReconciler struct {
 	client.Client
 	Scheme            *runtime.Scheme
