@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -39,6 +40,7 @@ import (
 	kubeswarmv1alpha1 "github.com/kubeswarm/kubeswarm/api/v1alpha1"
 	"github.com/kubeswarm/kubeswarm/internal/registry"
 	"github.com/kubeswarm/kubeswarm/internal/routing"
+	agenterrors "github.com/kubeswarm/kubeswarm/pkg/agent/errors"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/queue"
 	"github.com/kubeswarm/kubeswarm/pkg/audit"
 	"github.com/kubeswarm/kubeswarm/pkg/costs"
@@ -156,6 +158,14 @@ func (r *SwarmRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			}
 			return ctrl.Result{}, fmt.Errorf("fetching team %q: %w", run.Spec.TeamRef, err)
 		}
+		// Ensure the team label is set so the team controller's run-watch
+		// can map this run back to the parent team for phase mirroring.
+		if run.Labels == nil {
+			run.Labels = make(map[string]string)
+		}
+		if run.Labels[kubeswarmv1alpha1.LabelTeam] == "" {
+			run.Labels[kubeswarmv1alpha1.LabelTeam] = run.Spec.TeamRef
+		}
 		run.Spec.TeamGeneration = team.Generation
 		run.Spec.Pipeline = team.Spec.Pipeline
 		run.Spec.Roles = team.Spec.Roles
@@ -175,14 +185,8 @@ func (r *SwarmRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 	}
 
-	// Initialize steps on first reconcile (idempotent - only populates empty slice).
-	if run.Spec.Routing != nil {
-		flow.InitializeRouteStep(run)
-	} else {
-		flow.InitializeRunSteps(run)
-	}
-
-	// Transition to Running and record start time on first active reconcile.
+	// Validate inputs and check budgets before initializing steps, because
+	// InitializeRunSteps sets phase=Running which would skip validation.
 	if run.Status.Phase == "" || run.Status.Phase == kubeswarmv1alpha1.SwarmRunPhasePending {
 		// Validate and apply defaults from the parent SwarmTeam's spec.inputs schema.
 		if err := r.validateAndDefaultInputs(ctx, run); err != nil {
@@ -204,9 +208,6 @@ func (r *SwarmRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return ctrl.Result{}, r.Status().Update(ctx, run)
 		}
 
-		now := metav1.Now()
-		run.Status.Phase = kubeswarmv1alpha1.SwarmRunPhaseRunning
-		run.Status.StartTime = &now
 		if r.Recorder != nil {
 			r.Recorder.Eventf(run, nil, corev1.EventTypeNormal, "RunStarted", "Reconcile",
 				"SwarmRun %q started for team %q", run.Name, run.Spec.TeamRef)
@@ -215,6 +216,14 @@ func (r *SwarmRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if r.AuditEmitter != nil {
 			r.AuditEmitter.Emit(newRunAuditEvent(audit.ActionRunTriggered, audit.StatusSuccess, run, ""))
 		}
+	}
+
+	// Initialize steps on first reconcile (idempotent - only populates empty slice).
+	// Must run after validation so invalid runs never reach Running phase.
+	if run.Spec.Routing != nil {
+		flow.InitializeRouteStep(run)
+	} else {
+		flow.InitializeRunSteps(run)
 	}
 
 	// Enforce run-level timeout.
@@ -227,6 +236,9 @@ func (r *SwarmRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 				"SwarmRun %q timed out after %ds", run.Name, run.Spec.TimeoutSeconds)
 		}
 		r.cancelRunTasks(ctx, run, logger)
+		if r.NotifyDispatcher != nil {
+			r.NotifyDispatcher.DispatchRun(ctx, run)
+		}
 		return ctrl.Result{}, r.Status().Update(ctx, run)
 	}
 
@@ -344,6 +356,9 @@ func (r *SwarmRunReconciler) reconcileAgentRun(
 				"SwarmRun %q timed out after %ds", run.Name, run.Spec.TimeoutSeconds)
 		}
 		r.cancelRunTasks(ctx, run, logger)
+		if r.NotifyDispatcher != nil {
+			r.NotifyDispatcher.DispatchRun(ctx, run)
+		}
 		run.Status.ObservedGeneration = run.Generation
 		return ctrl.Result{}, r.Status().Update(ctx, run)
 	}
@@ -483,6 +498,7 @@ func (r *SwarmRunReconciler) applyAgentResult(
 		st.Phase = kubeswarmv1alpha1.PipelineStepPhaseFailed
 		st.CompletionTime = &now
 		st.Message = res.Error
+		st.ErrorCode, st.ErrorSuggestion = parseAgentErrorFields(res.Error)
 		return
 	}
 	st.Output = res.Output
@@ -635,6 +651,18 @@ func (r *SwarmRunReconciler) submitPendingSteps(
 			st.Message = ""
 		}
 
+		// Check run-level maxTokens cap before submitting.
+		if run.Spec.MaxTokens > 0 {
+			used := sumRunTokens(run)
+			if used >= run.Spec.MaxTokens {
+				now := metav1.Now()
+				st.Phase = kubeswarmv1alpha1.PipelineStepPhaseFailed
+				st.CompletionTime = &now
+				st.Message = fmt.Sprintf("MaxTokensExceeded: cumulative tokens %d reached run limit %d", used, run.Spec.MaxTokens)
+				continue
+			}
+		}
+
 		// Resolve the queue for this step's SwarmAgent.
 		submitQueue, closeQueue, err := r.resolveStepQueue(ctx, run.Namespace, run.Spec.TeamRef, agentName, step.Role)
 		if err != nil {
@@ -730,6 +758,12 @@ func (r *SwarmRunReconciler) collectResults(
 		}
 	}
 
+	// Build a role → maxOutputBytes map for output truncation.
+	maxOutputBytesByRole := make(map[string]int, len(run.Spec.Pipeline))
+	for i := range run.Spec.Pipeline {
+		maxOutputBytesByRole[run.Spec.Pipeline[i].Role] = run.Spec.Pipeline[i].MaxOutputBytes
+	}
+
 	for queueURL, grp := range byQueue {
 		q, closeQ, err := r.openQueueURL(queueURL)
 		if err != nil {
@@ -753,11 +787,12 @@ func (r *SwarmRunReconciler) collectResults(
 				st.Phase = kubeswarmv1alpha1.PipelineStepPhaseFailed
 				st.CompletionTime = &now
 				st.Message = res.Error
+				st.ErrorCode, st.ErrorSuggestion = parseAgentErrorFields(res.Error)
 				continue
 			}
 
 			// Agent succeeded - apply validation before marking the step final.
-			st.Output = res.Output
+			st.Output = truncateOutput(res.Output, maxOutputBytesByRole[st.Name])
 			if len(res.Artifacts) > 0 {
 				st.Artifacts = res.Artifacts
 			}
@@ -1288,7 +1323,9 @@ func (r *SwarmRunReconciler) resolveAgentForStep(
 	if agentName == "" {
 		if lookup.Fallback != "" {
 			// Fallback is used as-is - may be a role name or an SwarmAgent name.
-			return lookup.Fallback, false, nil
+			// Return resolvedByRegistry=true so st.ResolvedAgent is set, ensuring
+			// the result-polling path queries the correct agent queue.
+			return lookup.Fallback, true, nil
 		}
 		now := metav1.Now()
 		st.Phase = kubeswarmv1alpha1.PipelineStepPhaseFailed
@@ -1509,4 +1546,41 @@ func (r *SwarmRunReconciler) recordStepSpend(
 	if err := r.SpendStore.Record(ctx, entry); err != nil {
 		log.FromContext(ctx).Error(err, "recording spend entry", "run", run.Name, "step", st.Name)
 	}
+}
+
+// sumRunTokens returns the total tokens consumed so far across all completed steps.
+func sumRunTokens(run *kubeswarmv1alpha1.SwarmRun) int64 {
+	var total int64
+	for _, st := range run.Status.Steps {
+		if st.TokenUsage != nil {
+			total += st.TokenUsage.TotalTokens
+		}
+	}
+	return total
+}
+
+// truncateOutput limits output to maxBytes. When maxBytes is 0 (default from
+// CRD is 65536) the output is returned unchanged. Truncated output gets a
+// "[truncated]" marker appended.
+func truncateOutput(output string, maxBytes int) string {
+	if maxBytes <= 0 || len(output) <= maxBytes {
+		return output
+	}
+	return output[:maxBytes] + " [truncated]"
+}
+
+// parseAgentErrorFields extracts ErrorCode and ErrorSuggestion from an agent
+// error message formatted as "[ErrorCode] message" (the output of AgentError.Error()).
+// Returns empty strings when the message does not match the expected format.
+func parseAgentErrorFields(errMsg string) (code, suggestion string) {
+	if !strings.HasPrefix(errMsg, "[") {
+		return "", ""
+	}
+	end := strings.IndexByte(errMsg, ']')
+	if end < 2 {
+		return "", ""
+	}
+	code = errMsg[1:end]
+	suggestion = agenterrors.SuggestionForCode(agenterrors.ErrorCode(code))
+	return code, suggestion
 }

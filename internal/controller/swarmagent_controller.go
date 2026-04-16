@@ -139,6 +139,9 @@ type SwarmAgentReconciler struct {
 	// saEnsured tracks namespaces where SA/Role/RoleBinding already exist,
 	// avoiding 3 Gets every reconcile once they're confirmed present.
 	saEnsured sync.Map // map[string]struct{}
+	// NotifyDispatcher dispatches notifications for agent-level events (e.g. AgentDegraded).
+	// When nil, agent notifications are disabled.
+	NotifyDispatcher *NotifyDispatcher
 }
 
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmagents,verbs=get;list;watch;create;update;patch;delete
@@ -150,7 +153,7 @@ type SwarmAgentReconciler struct {
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmevents/finalizers,verbs=update
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmmemories,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmsettings,verbs=get;list;watch
-// +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmregistries,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmregistries,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmruns,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -160,7 +163,7 @@ type SwarmAgentReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch
 
-func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	logger := log.FromContext(ctx)
 
 	// 1. Fetch the SwarmAgent CR.
@@ -177,6 +180,20 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
+	// Single deferred status write: persists all in-memory status mutations
+	// (conditions, toolConnections, advisorConnections, etc.) on every exit
+	// path. This replaces scattered Status().Update calls that were prone to
+	// missed writes when new steps were added.
+	defer func() {
+		if err := r.Status().Update(ctx, swarmAgent); err != nil {
+			if retErr == nil {
+				retErr = fmt.Errorf("status update: %w", err)
+			} else {
+				logger.Error(err, "failed to persist status on error path")
+			}
+		}
+	}()
+
 	// 2a. Ensure a "default" SwarmRegistry exists in this namespace.
 	// Non-blocking: a creation error is logged but does not prevent agent reconciliation.
 	if err := r.ensureDefaultRegistry(ctx, req.Namespace); err != nil {
@@ -189,6 +206,16 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
+	// 3a. Record which settings were applied and how many fragments were composed.
+	settingsNames := make([]string, len(allSettings))
+	totalFragments := 0
+	for i, s := range allSettings {
+		settingsNames[i] = s.Name
+		totalFragments += len(s.Spec.Fragments)
+	}
+	swarmAgent.Status.AppliedSettings = settingsNames
+	swarmAgent.Status.AppliedFragmentCount = totalFragments
+
 	// 3a-bis. Compute effective reasoning config from the SwarmSettings cascade
 	// and set the ReasoningActive status condition per RFC-0033 DD7. This runs
 	// on every reconcile and before deployment logic so the condition is always
@@ -196,21 +223,9 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	r.applyReasoningCondition(swarmAgent, allSettings)
 
 	// 3b. Optionally load the referenced SwarmMemory.
-	var swarmMemory *kubeswarmv1alpha1.SwarmMemory
-	if swarmAgent.Spec.Runtime.Loop != nil &&
-		swarmAgent.Spec.Runtime.Loop.Memory != nil && swarmAgent.Spec.Runtime.Loop.Memory.Ref != nil {
-		mem := &kubeswarmv1alpha1.SwarmMemory{}
-		if err := r.Get(ctx, client.ObjectKey{
-			Name:      swarmAgent.Spec.Runtime.Loop.Memory.Ref.Name,
-			Namespace: swarmAgent.Namespace,
-		}, mem); err != nil {
-			if !errors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf("fetching SwarmMemory %q: %w", swarmAgent.Spec.Runtime.Loop.Memory.Ref.Name, err)
-			}
-			logger.Info("SwarmMemory not found, proceeding without it", "memoryRef", swarmAgent.Spec.Runtime.Loop.Memory.Ref.Name)
-		} else {
-			swarmMemory = mem
-		}
+	swarmMemory, err := r.loadSwarmMemory(ctx, swarmAgent)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// 3c. Resolve the effective system prompt (inline or from ConfigMap/Secret).
@@ -218,7 +233,6 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		logger.Error(err, "failed to resolve systemPrompt")
 		setCondition(&swarmAgent.Status.Conditions, swarmAgent.Generation, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "PromptResolutionError", err.Error())
-		_ = r.Status().Update(ctx, swarmAgent)
 		return ctrl.Result{}, err
 	}
 
@@ -231,7 +245,6 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		logger.Error(err, "failed to resolve apiKeyRef")
 		setCondition(&swarmAgent.Status.Conditions, swarmAgent.Generation, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "APIKeyResolutionError", err.Error())
-		_ = r.Status().Update(ctx, swarmAgent)
 		return ctrl.Result{}, err
 	}
 
@@ -240,7 +253,6 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		logger.Error(err, "failed to resolve MCP capabilityRefs")
 		setCondition(&swarmAgent.Status.Conditions, swarmAgent.Generation, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "MCPResolutionError", err.Error())
-		_ = r.Status().Update(ctx, swarmAgent)
 		return ctrl.Result{}, err
 	}
 
@@ -264,7 +276,6 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.reconcileAgentServiceAccount(ctx, swarmAgent); err != nil {
 		logger.Error(err, "failed to reconcile agent ServiceAccount")
 		r.setCondition(swarmAgent, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "ReconcileError", err.Error())
-		_ = r.Status().Update(ctx, swarmAgent)
 		return ctrl.Result{}, err
 	}
 
@@ -274,7 +285,6 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.reconcilePromptConfigMap(ctx, swarmAgent, assembledPrompt); err != nil {
 		logger.Error(err, "failed to reconcile prompt ConfigMap")
 		r.setCondition(swarmAgent, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "ReconcileError", err.Error())
-		_ = r.Status().Update(ctx, swarmAgent)
 		return ctrl.Result{}, err
 	}
 
@@ -283,6 +293,9 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	effectivePolicy := r.fetchEffectivePolicy(ctx, req.Namespace)
 
 	// 6. Reconcile the owned k8s Deployment (budget check may override replicas to 0).
+	// Gateway capabilities are resolved inside reconcileDeployment so transient
+	// registry-lookup errors flow through the existing deployment-error branch
+	// rather than adding a separate one.
 	if err := r.reconcileDeployment(ctx, deploymentInput{
 		swarmAgent:         swarmAgent,
 		allSettings:        allSettings,
@@ -295,7 +308,6 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}); err != nil {
 		logger.Error(err, "failed to reconcile Deployment")
 		r.setCondition(swarmAgent, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "ReconcileError", err.Error())
-		_ = r.Status().Update(ctx, swarmAgent)
 		return ctrl.Result{}, err
 	}
 
@@ -303,7 +315,6 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.reconcileNetworkPolicy(ctx, swarmAgent, resolvedMCPServers); err != nil {
 		logger.Error(err, "failed to reconcile NetworkPolicy")
 		r.setCondition(swarmAgent, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "NetworkPolicyError", err.Error())
-		_ = r.Status().Update(ctx, swarmAgent)
 		return ctrl.Result{}, err
 	}
 
@@ -323,10 +334,7 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// 9. Probe MCP server health and surface results in status.toolConnections[].
-	mcpRequeue, err := r.reconcileMCPHealth(ctx, swarmAgent, resolvedMCPServers)
-	if err != nil {
-		logger.Error(err, "failed to reconcile MCP health")
-	}
+	mcpRequeue := r.reconcileMCPHealth(swarmAgent, resolvedMCPServers)
 	if mcpRequeue > 0 && (requeueAfter == 0 || mcpRequeue < requeueAfter) {
 		requeueAfter = mcpRequeue
 	}
@@ -336,12 +344,43 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	swarmAgent.Status.AdvisorConnections = advisorStatuses
 	setCondition(&swarmAgent.Status.Conditions, swarmAgent.Generation, kubeswarmv1alpha1.ConditionAdvisorsReady, advisorCondition.Status, advisorCondition.Reason, advisorCondition.Message)
 
+	// 9c. Reconcile tool-role agent connections: check targets, set status.
+	swarmAgent.Status.ToolAgentConnections = reconcileToolAgentConnections(ctx, r.Client, swarmAgent)
+
+	// 9d. Surface dedup config in status.
+	swarmAgent.Status.DedupEnabled = swarmAgent.Spec.Runtime.Loop != nil && swarmAgent.Spec.Runtime.Loop.Dedup
+
 	// 10. Reconcile KEDA ScaledObject when autoscaling is configured.
 	if err := r.reconcileKEDA(ctx, swarmAgent); err != nil {
 		logger.Error(err, "failed to reconcile KEDA ScaledObject")
 	}
 
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// loadSwarmMemory loads the SwarmMemory referenced by spec.runtime.loop.memory.ref.
+// Returns nil, nil when no memory is configured or the referenced object is not found.
+func (r *SwarmAgentReconciler) loadSwarmMemory(
+	ctx context.Context,
+	agent *kubeswarmv1alpha1.SwarmAgent,
+) (*kubeswarmv1alpha1.SwarmMemory, error) {
+	if agent.Spec.Runtime.Loop == nil ||
+		agent.Spec.Runtime.Loop.Memory == nil || agent.Spec.Runtime.Loop.Memory.Ref == nil {
+		return nil, nil
+	}
+	mem := &kubeswarmv1alpha1.SwarmMemory{}
+	if err := r.Get(ctx, client.ObjectKey{
+		Name:      agent.Spec.Runtime.Loop.Memory.Ref.Name,
+		Namespace: agent.Namespace,
+	}, mem); err != nil {
+		if errors.IsNotFound(err) {
+			log.FromContext(ctx).Info("SwarmMemory not found, proceeding without it",
+				"memoryRef", agent.Spec.Runtime.Loop.Memory.Ref.Name)
+			return nil, nil
+		}
+		return nil, fmt.Errorf("fetching SwarmMemory %q: %w", agent.Spec.Runtime.Loop.Memory.Ref.Name, err)
+	}
+	return mem, nil
 }
 
 // fetchEffectivePolicy reads the pre-merged effective policy from the first
@@ -370,17 +409,38 @@ func (r *SwarmAgentReconciler) fetchEffectivePolicy(ctx context.Context, namespa
 
 // deploymentInput groups all inputs needed to build or reconcile the agent Deployment.
 type deploymentInput struct {
-	swarmAgent         *kubeswarmv1alpha1.SwarmAgent
-	allSettings        []kubeswarmv1alpha1.SwarmSettings
-	swarmMemory        *kubeswarmv1alpha1.SwarmMemory
-	assembledPrompt    string
-	apiKeyEnvVar       *corev1.EnvVar
-	apiKeyVersion      string
-	resolvedMCPServers []kubeswarmv1alpha1.MCPToolSpec
-	effectivePolicy    *kubeswarmv1alpha1.EffectivePolicySpec
+	swarmAgent          *kubeswarmv1alpha1.SwarmAgent
+	allSettings         []kubeswarmv1alpha1.SwarmSettings
+	swarmMemory         *kubeswarmv1alpha1.SwarmMemory
+	assembledPrompt     string
+	apiKeyEnvVar        *corev1.EnvVar
+	apiKeyVersion       string
+	resolvedMCPServers  []kubeswarmv1alpha1.MCPToolSpec
+	effectivePolicy     *kubeswarmv1alpha1.EffectivePolicySpec
+	gatewayCapabilities []GatewayCapabilityEntry // RFC-0052, populated inside reconcileDeployment
 }
 
 func (r *SwarmAgentReconciler) reconcileDeployment(ctx context.Context, in deploymentInput) error {
+	// Resolve gateway capabilities before building the Deployment so transient
+	// registry-lookup errors requeue instead of leaving the pod with a stale or
+	// misleading AGENT_GATEWAY_CAPABILITIES env var.
+	caps, err := r.resolveGatewayCapsForReconcile(ctx, in.swarmAgent)
+	if err != nil {
+		return err
+	}
+	in.gatewayCapabilities = caps
+
+	// Update gateway status fields so operators can observe capability counts.
+	if in.swarmAgent.Spec.Gateway != nil {
+		filtered := filterCapabilities(in.swarmAgent.Spec.Gateway, caps)
+		now := metav1.Now()
+		in.swarmAgent.Status.Gateway = &kubeswarmv1alpha1.GatewayStatus{
+			RoutableCapabilities:      int32(len(filtered)),
+			TotalMatchingCapabilities: int32(len(caps)),
+			LastCapabilitySync:        &now,
+		}
+	}
+
 	desired := r.buildDeployment(in)
 
 	if err := ctrl.SetControllerReference(in.swarmAgent, desired, r.Scheme); err != nil {
@@ -388,7 +448,7 @@ func (r *SwarmAgentReconciler) reconcileDeployment(ctx context.Context, in deplo
 	}
 
 	existing := &appsv1.Deployment{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(desired), existing)
+	err = r.Get(ctx, client.ObjectKeyFromObject(desired), existing)
 	if errors.IsNotFound(err) {
 		return r.Create(ctx, desired)
 	}
@@ -759,7 +819,8 @@ func (r *SwarmAgentReconciler) buildDeployment(in deploymentInput) *appsv1.Deplo
 					},
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: agentServiceAccount,
+					TerminationGracePeriodSeconds: in.swarmAgent.Spec.Runtime.DrainTimeoutSeconds,
+					ServiceAccountName:            agentServiceAccount,
 					// Pod-level security: enforce non-root user and RuntimeDefault seccomp
 					// profile. Matches the operator pod's own PodSecurityContext.
 					SecurityContext: &corev1.PodSecurityContext{
@@ -788,7 +849,7 @@ func (r *SwarmAgentReconciler) buildDeployment(in deploymentInput) *appsv1.Deplo
 						// Resource limits - use spec.resources if set, otherwise inject safe defaults.
 						// Ephemeral storage limit is always added to prevent /tmp exhaustion.
 						Resources: agentResources(swarmAgent),
-						Env:       r.buildEnvVars(swarmAgent, allSettings, swarmMemory, apiKeyEnvVar, resolvedMCPServers, effectivePolicy),
+						Env:       r.buildEnvVars(swarmAgent, allSettings, swarmMemory, apiKeyEnvVar, resolvedMCPServers, effectivePolicy, in.gatewayCapabilities),
 						// Global fallback secret (set via Helm apiKeys.existingSecret).
 						// Per-agent spec.envFrom entries are appended after and take precedence.
 						EnvFrom: func() []corev1.EnvFromSource {
@@ -1299,6 +1360,7 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 	apiKeyEnvVar *corev1.EnvVar,
 	resolvedMCPServers []kubeswarmv1alpha1.MCPToolSpec,
 	effectivePolicy *kubeswarmv1alpha1.EffectivePolicySpec,
+	gatewayCapabilities []GatewayCapabilityEntry,
 ) []corev1.EnvVar {
 	mcpJSON, _ := json.Marshal(buildMCPRuntimeConfigs(resolvedMCPServers))
 
@@ -1359,6 +1421,28 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 			Name:  "AGENT_VALIDATOR_PROMPT",
 			Value: swarmAgent.Spec.Observability.HealthCheck.Prompt,
 		})
+	}
+
+	// Propagate logging configuration when spec.observability.logging is set.
+	if swarmAgent.Spec.Observability != nil && swarmAgent.Spec.Observability.Logging != nil {
+		logging := swarmAgent.Spec.Observability.Logging
+		if logging.Level != "" {
+			envVars = append(envVars, corev1.EnvVar{Name: "AGENT_LOG_LEVEL", Value: string(logging.Level)})
+		}
+		if logging.ToolCalls {
+			envVars = append(envVars, corev1.EnvVar{Name: "AGENT_LOG_TOOL_CALLS", Value: "true"})
+		}
+		if logging.LLMTurns {
+			envVars = append(envVars, corev1.EnvVar{Name: "AGENT_LOG_LLM_TURNS", Value: "true"})
+		}
+		if logging.Redaction != nil {
+			if logging.Redaction.Secrets {
+				envVars = append(envVars, corev1.EnvVar{Name: "AGENT_LOG_REDACT_SECRETS", Value: "true"})
+			}
+			if logging.Redaction.PII {
+				envVars = append(envVars, corev1.EnvVar{Name: "AGENT_LOG_REDACT_PII", Value: "true"})
+			}
+		}
 	}
 
 	// Inject env vars forwarded from the operator pod via SWARM_AGENT_INJECT_* prefix.
@@ -1453,8 +1537,26 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 		})
 	}
 
+	// Inject circuit breaker config when configured in guardrails.
+	if swarmAgent.Spec.Guardrails != nil && swarmAgent.Spec.Guardrails.Limits != nil &&
+		swarmAgent.Spec.Guardrails.Limits.CircuitBreaker != nil {
+		cb := swarmAgent.Spec.Guardrails.Limits.CircuitBreaker
+		cbJSON, _ := json.Marshal(map[string]int{
+			"failureThreshold": cb.FailureThreshold,
+			"cooldownSeconds":  cb.CooldownSeconds,
+			"halfOpenMaxCalls": cb.HalfOpenMaxCalls,
+		})
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "AGENT_CIRCUIT_BREAKER",
+			Value: string(cbJSON),
+		})
+	}
+
 	// Inject advisor connection configs as JSON (RFC-0048).
 	envVars = append(envVars, buildAdvisorEnvVars(swarmAgent)...)
+
+	// Inject gateway configuration (RFC-0052).
+	envVars = append(envVars, buildGatewayEnvVars(swarmAgent, gatewayCapabilities)...)
 
 	// Deduplicate: last occurrence wins. This prevents warnings when
 	// SWARM_AGENT_INJECT_TASK_QUEUE_URL and the team annotation both set TASK_QUEUE_URL.
@@ -1521,6 +1623,17 @@ func buildArtifactEnvVars(swarmAgent *kubeswarmv1alpha1.SwarmAgent) []corev1.Env
 		artifactDir = after
 	}
 	out = append(out, corev1.EnvVar{Name: "AGENT_ARTIFACT_DIR", Value: artifactDir})
+
+	// Inject save-output config when spec.runtime.artifacts is set.
+	if swarmAgent.Spec.Runtime.Artifacts != nil && swarmAgent.Spec.Runtime.Artifacts.SaveOutput {
+		out = append(out, corev1.EnvVar{Name: "AGENT_ARTIFACT_SAVE_OUTPUT", Value: "true"})
+		format := swarmAgent.Spec.Runtime.Artifacts.Format
+		if format == "" {
+			format = "text"
+		}
+		out = append(out, corev1.EnvVar{Name: "AGENT_ARTIFACT_SAVE_FORMAT", Value: string(format)})
+	}
+
 	return out
 }
 
@@ -1700,6 +1813,10 @@ func (r *SwarmAgentReconciler) reconcileDailyBudget(
 	if usage.TotalTokens >= limit {
 		r.setCondition(dep, kubeswarmv1alpha1.ConditionBudgetExceeded, metav1.ConditionTrue, "DailyLimitReached",
 			fmt.Sprintf("daily token usage %d exceeds limit %d; replicas scaled to 0", usage.TotalTokens, limit))
+		// Dispatch DailyLimitReached notification.
+		if r.NotifyDispatcher != nil {
+			r.NotifyDispatcher.DispatchDailyLimitReached(context.Background(), dep)
+		}
 		// Requeue when the oldest entry leaves the window so we can restore replicas.
 		if earliestInWindow != nil {
 			ttl := earliestInWindow.Add(24 * time.Hour).Sub(now)
@@ -1731,14 +1848,13 @@ const mcpHealthRequeueInterval = 60 * time.Second
 // Probe failures are non-blocking: they update status but do not prevent the rest of
 // the reconcile loop from completing.
 func (r *SwarmAgentReconciler) reconcileMCPHealth(
-	ctx context.Context,
 	agent *kubeswarmv1alpha1.SwarmAgent,
 	resolvedMCPServers []kubeswarmv1alpha1.MCPToolSpec,
-) (time.Duration, error) {
+) time.Duration {
 	if len(resolvedMCPServers) == 0 {
 		apimeta.RemoveStatusCondition(&agent.Status.Conditions, kubeswarmv1alpha1.ConditionMCPDegraded)
 		agent.Status.ToolConnections = nil
-		return 0, nil
+		return 0
 	}
 
 	now := metav1.Now()
@@ -1756,6 +1872,8 @@ func (r *SwarmAgentReconciler) reconcileMCPHealth(
 				Name:      srv.Name,
 				URL:       srv.URL,
 				LastCheck: &now,
+				AuthType:  mcpAuthType(srv),
+				Trust:     effectiveTrust(srv.Trust, agent),
 			}
 			u, err := neturl.Parse(srv.URL)
 			if err != nil {
@@ -1790,20 +1908,6 @@ func (r *SwarmAgentReconciler) reconcileMCPHealth(
 	}
 	wg.Wait()
 
-	// Check if health results changed before issuing a status update.
-	changed := len(statuses) != len(agent.Status.ToolConnections)
-	if !changed {
-		for i, s := range statuses {
-			prev := agent.Status.ToolConnections[i]
-			if s.Name != prev.Name || s.URL != prev.URL ||
-				(s.Healthy == nil) != (prev.Healthy == nil) ||
-				(s.Healthy != nil && prev.Healthy != nil && *s.Healthy != *prev.Healthy) {
-				changed = true
-				break
-			}
-		}
-	}
-
 	agent.Status.ToolConnections = statuses
 
 	if allHealthy {
@@ -1811,15 +1915,60 @@ func (r *SwarmAgentReconciler) reconcileMCPHealth(
 	} else {
 		r.setCondition(agent, kubeswarmv1alpha1.ConditionMCPDegraded, metav1.ConditionTrue, "MCPUnreachable",
 			"one or more MCP servers are unreachable; see status.toolConnections for details")
-	}
-
-	if changed {
-		if err := r.Status().Update(ctx, agent); err != nil {
-			return 0, err
+		// Dispatch AgentDegraded notification when the agent has a notifyRef.
+		if r.NotifyDispatcher != nil {
+			r.NotifyDispatcher.DispatchAgentDegraded(context.Background(), agent)
 		}
 	}
 
-	return mcpHealthRequeueInterval, nil
+	return mcpHealthRequeueInterval
+}
+
+// mcpAuthType returns the auth type string for a given MCP server spec.
+func mcpAuthType(srv kubeswarmv1alpha1.MCPToolSpec) string {
+	if srv.Auth == nil {
+		return "none"
+	}
+	if srv.Auth.Bearer != nil {
+		return mcpAuthBearer
+	}
+	if srv.Auth.MTLS != nil {
+		return mcpAuthMTLS
+	}
+	return "none"
+}
+
+// reconcileToolAgentConnections checks all tool-role agent connections and
+// returns their status. This mirrors reconcileAdvisorConnections but for
+// role=tool entries in spec.agents.
+func reconcileToolAgentConnections(
+	ctx context.Context,
+	c client.Client,
+	agent *kubeswarmv1alpha1.SwarmAgent,
+) []kubeswarmv1alpha1.ToolAgentConnectionStatus {
+	var statuses []kubeswarmv1alpha1.ToolAgentConnectionStatus
+	now := metav1.Now()
+	for _, conn := range agent.Spec.Agents {
+		if conn.Role != kubeswarmv1alpha1.AgentConnectionRoleTool {
+			continue
+		}
+		s := kubeswarmv1alpha1.ToolAgentConnectionStatus{
+			Name:               conn.Name,
+			Trust:              effectiveTrust(conn.Trust, agent),
+			LastTransitionTime: now,
+		}
+		if conn.AgentRef != nil {
+			target := &kubeswarmv1alpha1.SwarmAgent{}
+			if err := c.Get(ctx, client.ObjectKey{
+				Name:      conn.AgentRef.Name,
+				Namespace: agent.Namespace,
+			}, target); err == nil {
+				s.Ready = target.Status.ReadyReplicas > 0
+			}
+		}
+		statuses = append(statuses, s)
+	}
+	return statuses
 }
 
 // runToAgents maps a changed SwarmRun to all SwarmAgents referenced by its roles,
@@ -1831,6 +1980,19 @@ func (r *SwarmAgentReconciler) runToAgents(ctx context.Context, obj client.Objec
 	}
 	seen := make(map[string]struct{})
 	var reqs []reconcile.Request
+
+	// Standalone agent runs: map directly to the named agent.
+	if run.Spec.Agent != "" {
+		seen[run.Spec.Agent] = struct{}{}
+		reqs = append(reqs, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      run.Spec.Agent,
+				Namespace: run.Namespace,
+			},
+		})
+	}
+
+	// Team runs: map via roles.
 	for _, role := range run.Spec.Roles {
 		agentName := resolveRoleAgentName(run.Spec.TeamRef, role)
 		if _, dup := seen[agentName]; dup {
@@ -2216,8 +2378,49 @@ func (r *SwarmAgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&kubeswarmv1alpha1.SwarmSettings{},
 			handler.EnqueueRequestsFromMapFunc(r.settingsToAgents),
 		).
+		// Re-evaluate gateway capabilities when any agent changes readiness
+		// (new capability agents becoming ready, agents being deleted, etc.).
+		Watches(
+			&kubeswarmv1alpha1.SwarmAgent{},
+			handler.EnqueueRequestsFromMapFunc(r.agentToGateways),
+		).
 		Named("swarmagent").
 		Complete(WithMetrics(r, "swarmagent"))
+}
+
+// agentToGateways maps a changed SwarmAgent to all gateway agents in the same
+// namespace so they re-evaluate their capability list when agents become ready,
+// gain capabilities, or are deleted.
+func (r *SwarmAgentReconciler) agentToGateways(ctx context.Context, obj client.Object) []reconcile.Request {
+	agent, ok := obj.(*kubeswarmv1alpha1.SwarmAgent)
+	if !ok {
+		return nil
+	}
+	// Don't re-enqueue gateway agents for their own changes (avoid infinite loop).
+	if agent.Spec.Gateway != nil {
+		return nil
+	}
+	// Only react when the agent has capabilities (potential gateway targets).
+	if len(agent.Spec.Capabilities) == 0 {
+		return nil
+	}
+
+	var agents kubeswarmv1alpha1.SwarmAgentList
+	if err := r.List(ctx, &agents, client.InNamespace(agent.Namespace)); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for _, a := range agents.Items {
+		if a.Spec.Gateway != nil {
+			reqs = append(reqs, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      a.Name,
+					Namespace: a.Namespace,
+				},
+			})
+		}
+	}
+	return reqs
 }
 
 // agentInjectEnvVars reads env vars prefixed with SWARM_AGENT_INJECT_ from the
@@ -2259,6 +2462,7 @@ type clusterAuditConfig struct {
 	maxDetailBytes int
 	redisURL       string
 	maxStreamLen   int64
+	webhookURL     string
 	redact         []string
 }
 
@@ -2280,6 +2484,7 @@ func getClusterAuditConfig() clusterAuditConfig {
 			}
 		}
 		clusterAuditCached.redisURL = os.Getenv("AUDIT_LOG_REDIS_URL")
+		clusterAuditCached.webhookURL = os.Getenv("AUDIT_LOG_WEBHOOK_URL")
 		if v := os.Getenv("AUDIT_LOG_MAX_STREAM_LEN"); v != "" {
 			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 				clusterAuditCached.maxStreamLen = n
@@ -2333,6 +2538,9 @@ func buildAuditLogEnvVar(agent *kubeswarmv1alpha1.SwarmAgent) string {
 	if cluster.maxStreamLen > 0 {
 		cfg["maxStreamLen"] = cluster.maxStreamLen
 	}
+	if cluster.webhookURL != "" {
+		cfg["webhookURL"] = cluster.webhookURL
+	}
 
 	// Merge redaction patterns: cluster + agent level.
 	redact := append([]string{}, cluster.redact...)
@@ -2366,4 +2574,20 @@ func (r *SwarmAgentReconciler) setCondition(
 	reason, message string,
 ) {
 	setCondition(&swarmAgent.Status.Conditions, swarmAgent.Generation, condType, status, reason, message)
+}
+
+// effectiveTrust returns the explicit trust level if set, otherwise falls back
+// to the agent's guardrails.tools.trust.default. Returns "external" as the
+// ultimate fallback (matching the CRD default for ToolTrustPolicy.Default).
+func effectiveTrust(explicit kubeswarmv1alpha1.ToolTrustLevel, agent *kubeswarmv1alpha1.SwarmAgent) kubeswarmv1alpha1.ToolTrustLevel {
+	if explicit != "" {
+		return explicit
+	}
+	if agent.Spec.Guardrails != nil &&
+		agent.Spec.Guardrails.Tools != nil &&
+		agent.Spec.Guardrails.Tools.Trust != nil &&
+		agent.Spec.Guardrails.Tools.Trust.Default != "" {
+		return agent.Spec.Guardrails.Tools.Trust.Default
+	}
+	return kubeswarmv1alpha1.ToolTrustExternal
 }

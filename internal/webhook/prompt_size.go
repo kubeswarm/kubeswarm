@@ -200,6 +200,13 @@ func (v *SwarmAgentPromptValidator) Handle(ctx context.Context, req admission.Re
 		return admission.Denied(advisorErrs[0].Error())
 	}
 
+	// RFC-0052: validate gateway configuration.
+	gwErrs, gwWarnings := ValidateGatewayConfig(ctx, v.client, agent)
+	if len(gwErrs) > 0 {
+		return admission.Denied(gwErrs[0].Error())
+	}
+	warnings = append(warnings, gwWarnings...)
+
 	// MCP security policy enforcement (RFC-0016 Phase 5).
 	// Load all SwarmSettings in the namespace and apply the strictest policy found.
 	if denied, reason := v.checkMCPPolicy(ctx, req.Namespace, agent); denied {
