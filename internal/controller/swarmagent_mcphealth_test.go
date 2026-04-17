@@ -73,8 +73,7 @@ func TestSwarmAgentControllerMCPHealthProbes(t *testing.T) {
 			servers := []kubeswarmv1alpha1.MCPToolSpec{
 				{Name: "healthy-server", URL: srv.URL},
 			}
-			_, err := r.reconcileMCPHealth(ctx, agent, servers)
-			requireNoError(t, err)
+			r.reconcileMCPHealth(agent, servers)
 
 			requireLen(t, agent.Status.ToolConnections, 1)
 			if agent.Status.ToolConnections[0].Healthy == nil {
@@ -109,8 +108,7 @@ func TestSwarmAgentControllerMCPHealthProbes(t *testing.T) {
 			servers := []kubeswarmv1alpha1.MCPToolSpec{
 				{Name: "error-server", URL: srv.URL},
 			}
-			_, err := r.reconcileMCPHealth(ctx, agent, servers)
-			requireNoError(t, err)
+			r.reconcileMCPHealth(agent, servers)
 
 			requireLen(t, agent.Status.ToolConnections, 1)
 			if agent.Status.ToolConnections[0].Healthy == nil {
@@ -144,8 +142,7 @@ func TestSwarmAgentControllerMCPHealthProbes(t *testing.T) {
 			servers := []kubeswarmv1alpha1.MCPToolSpec{
 				{Name: "auth-server", URL: srv.URL},
 			}
-			_, err := r.reconcileMCPHealth(ctx, agent, servers)
-			requireNoError(t, err)
+			r.reconcileMCPHealth(agent, servers)
 
 			if agent.Status.ToolConnections[0].Healthy == nil {
 				t.Fatal("expected non-nil Healthy")
@@ -171,8 +168,7 @@ func TestSwarmAgentControllerMCPHealthProbes(t *testing.T) {
 			servers := []kubeswarmv1alpha1.MCPToolSpec{
 				{Name: "gone-server", URL: "http://127.0.0.1:1"},
 			}
-			_, err := r.reconcileMCPHealth(ctx, agent, servers)
-			requireNoError(t, err)
+			r.reconcileMCPHealth(agent, servers)
 
 			if agent.Status.ToolConnections[0].Healthy == nil {
 				t.Fatal("expected non-nil Healthy")
@@ -204,8 +200,7 @@ func TestSwarmAgentControllerMCPHealthProbes(t *testing.T) {
 			requireNoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: agentName, Namespace: namespace}, agent))
 
 			r := newReconciler()
-			_, err := r.reconcileMCPHealth(ctx, agent, nil)
-			requireNoError(t, err)
+			r.reconcileMCPHealth(agent, nil)
 
 			if agent.Status.ToolConnections != nil {
 				t.Fatalf("expected nil ToolConnections, got %v", agent.Status.ToolConnections)
@@ -245,8 +240,7 @@ func TestSwarmAgentControllerMCPHealthProbes(t *testing.T) {
 			})
 
 			// Now reconcile with healthy server - should clear condition.
-			_, err := r.reconcileMCPHealth(ctx, agent, servers)
-			requireNoError(t, err)
+			r.reconcileMCPHealth(agent, servers)
 
 			if agent.Status.ToolConnections[0].Healthy == nil {
 				t.Fatal("expected non-nil Healthy")

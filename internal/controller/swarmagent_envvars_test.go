@@ -39,7 +39,7 @@ func envVal(envs []corev1.EnvVar, name string) (string, bool) {
 // buildTestEnvVars calls the production buildEnvVars with minimal dependencies.
 func buildTestEnvVars(agent *kubeswarmv1alpha1.SwarmAgent, mcpServers []kubeswarmv1alpha1.MCPToolSpec) []corev1.EnvVar {
 	r := &SwarmAgentReconciler{AgentImage: "test:latest"}
-	return r.buildEnvVars(agent, nil, nil, nil, mcpServers, nil)
+	return r.buildEnvVars(agent, nil, nil, nil, mcpServers, nil, nil)
 }
 
 func TestSwarmAgentControllerEnvVarMapping(t *testing.T) {
