@@ -99,6 +99,8 @@ type AuditLogConfig struct {
 	RedisURL string `json:"redisURL,omitempty"`
 	// MaxStreamLen overrides the MAXLEN ~ cap on the audit Redis stream (default 100000).
 	MaxStreamLen int64 `json:"maxStreamLen,omitempty"`
+	// WebhookURL is the HTTP endpoint when sink=webhook. The agent POSTs []AuditEvent batches.
+	WebhookURL string `json:"webhookURL,omitempty"`
 }
 
 // MCPServerConfig holds the connection details for one MCP tool server.
@@ -141,6 +143,35 @@ type WebhookToolConfig struct {
 	Method string `json:"method"`
 	// InputSchema is a JSON Schema string describing the tool's input parameters.
 	InputSchema string `json:"inputSchema"`
+}
+
+// GatewayCapabilityConfig is one capability entry injected by the operator (RFC-0052).
+type GatewayCapabilityConfig struct {
+	Name          string   `json:"name"`
+	Description   string   `json:"description"`
+	Agent         string   `json:"agent"`
+	Namespace     string   `json:"namespace"`
+	Tags          []string `json:"tags"`
+	ReadyReplicas int32    `json:"readyReplicas"`
+}
+
+// GatewayRuntimeConfig holds gateway dispatch settings (RFC-0052).
+type GatewayRuntimeConfig struct {
+	DispatchMode           string   `json:"dispatchMode"`
+	DispatchTimeoutSeconds int32    `json:"dispatchTimeoutSeconds"`
+	MaxDispatchDepth       int32    `json:"maxDispatchDepth"`
+	MaxResultsPerSearch    int32    `json:"maxResultsPerSearch"`
+	MaxDispatchCalls       int32    `json:"maxDispatchCalls"`
+	MaxSearchCalls         int32    `json:"maxSearchCalls"`
+	FallbackMode           string   `json:"fallbackMode"`
+	FallbackAgent          string   `json:"fallbackAgent,omitempty"`
+	AllowedTargets         []string `json:"allowedTargets,omitempty"`
+}
+
+// GatewayToolConfig is a tool definition injected by the operator (RFC-0052).
+type GatewayToolConfig struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 // AdvisorConfig holds the runtime configuration for one advisor connection (RFC-0048).
@@ -261,6 +292,44 @@ type Config struct {
 	// Injected by the operator as AGENT_ADVISORS (JSON array).
 	// Nil when the agent has no advisor connections.
 	Advisors []AdvisorConfig
+	// GatewayCapabilities is the list of capabilities injected by the operator (RFC-0052).
+	// Set via AGENT_GATEWAY_CAPABILITIES (JSON array). Nil when not a gateway agent.
+	GatewayCapabilities []GatewayCapabilityConfig
+	// GatewayConfig holds gateway dispatch settings (RFC-0052).
+	// Set via AGENT_GATEWAY_CONFIG (JSON). Nil when not a gateway agent.
+	GatewayConfig *GatewayRuntimeConfig
+	// GatewayTools holds tool definitions injected by the operator (RFC-0052).
+	// Set via AGENT_GATEWAY_TOOLS (JSON array). Nil when not a gateway agent.
+	GatewayTools []GatewayToolConfig
+	// CircuitBreaker configures the circuit breaker for tool calls.
+	// Set via AGENT_CIRCUIT_BREAKER (JSON). Nil when not configured.
+	CircuitBreaker *CircuitBreakerConfig
+	// ArtifactSaveOutput auto-saves task output to AGENT_ARTIFACT_DIR.
+	// Set via AGENT_ARTIFACT_SAVE_OUTPUT=true.
+	ArtifactSaveOutput bool
+	// ArtifactSaveFormat controls the output filename extension.
+	// Set via AGENT_ARTIFACT_SAVE_FORMAT. Defaults to "text".
+	ArtifactSaveFormat string
+	// ArtifactSaveExtension is the resolved file extension (e.g. ".txt", ".json").
+	// Derived from ArtifactSaveFormat via ArtifactFormatExtensions.
+	ArtifactSaveExtension string
+}
+
+// ArtifactFormatExtensions maps format names to file extensions.
+// Mirrors kubeswarmv1alpha1.ArtifactFormatExtension for use in the runtime
+// module which cannot import the CRD types.
+var ArtifactFormatExtensions = map[string]string{
+	"text":     ".txt",
+	"json":     ".json",
+	"markdown": ".md",
+	"yaml":     ".yaml",
+}
+
+// CircuitBreakerConfig holds the parsed circuit breaker settings.
+type CircuitBreakerConfig struct {
+	FailureThreshold int `json:"failureThreshold"`
+	CooldownSeconds  int `json:"cooldownSeconds"`
+	HalfOpenMaxCalls int `json:"halfOpenMaxCalls"`
 }
 
 // Load reads agent configuration from environment variables.
@@ -364,6 +433,49 @@ func Load() (*Config, error) {
 			return nil, agenterrors.NewConfigError(agenterrors.ErrConfigInvalid, "invalid AGENT_ADVISORS JSON", err)
 		}
 		cfg.Advisors = advisors
+	}
+
+	// Parse gateway configuration (RFC-0052).
+	if v := os.Getenv("AGENT_GATEWAY_CAPABILITIES"); v != "" {
+		var caps []GatewayCapabilityConfig
+		if err := json.Unmarshal([]byte(v), &caps); err != nil {
+			return nil, agenterrors.NewConfigError(agenterrors.ErrConfigInvalid, "invalid AGENT_GATEWAY_CAPABILITIES JSON", err)
+		}
+		cfg.GatewayCapabilities = caps
+	}
+	if v := os.Getenv("AGENT_GATEWAY_CONFIG"); v != "" {
+		var gwCfg GatewayRuntimeConfig
+		if err := json.Unmarshal([]byte(v), &gwCfg); err != nil {
+			return nil, agenterrors.NewConfigError(agenterrors.ErrConfigInvalid, "invalid AGENT_GATEWAY_CONFIG JSON", err)
+		}
+		cfg.GatewayConfig = &gwCfg
+	}
+	if v := os.Getenv("AGENT_GATEWAY_TOOLS"); v != "" {
+		var tools []GatewayToolConfig
+		if err := json.Unmarshal([]byte(v), &tools); err != nil {
+			return nil, agenterrors.NewConfigError(agenterrors.ErrConfigInvalid, "invalid AGENT_GATEWAY_TOOLS JSON", err)
+		}
+		cfg.GatewayTools = tools
+	}
+
+	if os.Getenv("AGENT_ARTIFACT_SAVE_OUTPUT") == "true" {
+		cfg.ArtifactSaveOutput = true
+		cfg.ArtifactSaveFormat = os.Getenv("AGENT_ARTIFACT_SAVE_FORMAT")
+		if cfg.ArtifactSaveFormat == "" {
+			cfg.ArtifactSaveFormat = "text"
+		}
+		cfg.ArtifactSaveExtension = ArtifactFormatExtensions[cfg.ArtifactSaveFormat]
+		if cfg.ArtifactSaveExtension == "" {
+			cfg.ArtifactSaveExtension = ".txt" // safe fallback
+		}
+	}
+
+	if v := os.Getenv("AGENT_CIRCUIT_BREAKER"); v != "" {
+		var cb CircuitBreakerConfig
+		if err := json.Unmarshal([]byte(v), &cb); err != nil {
+			return nil, agenterrors.NewConfigError(agenterrors.ErrConfigInvalid, "invalid AGENT_CIRCUIT_BREAKER JSON", err)
+		}
+		cfg.CircuitBreaker = &cb
 	}
 
 	return cfg, nil

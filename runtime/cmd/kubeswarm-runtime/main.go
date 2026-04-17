@@ -247,6 +247,13 @@ func initAudit(logger *slog.Logger, cfg *config.Config, r *runner.Runner) func()
 			logger.Warn("audit sink=redis but no redisURL configured, falling back to stdout")
 			auditSink = audit.NewStdoutSink(nil)
 		}
+	case "webhook":
+		if cfg.AuditLog.WebhookURL != "" {
+			auditSink = audit.NewWebhookSink(cfg.AuditLog.WebhookURL)
+		} else {
+			logger.Warn("audit sink=webhook but no webhookURL configured, falling back to stdout")
+			auditSink = audit.NewStdoutSink(nil)
+		}
 	case "stdout", "":
 		auditSink = audit.NewStdoutSink(nil)
 	default:
@@ -402,6 +409,13 @@ func processTask(
 	}
 	k8sEvents.TaskCompleted(t.ID, usage.InputTokens, usage.OutputTokens)
 	collected := collectArtifacts(ctx, cfg, t)
+	// Merge auto-saved output artifact (direct upload, no disk write).
+	for k, v := range saveOutputArtifact(ctx, cfg, t, result) {
+		if collected == nil {
+			collected = make(map[string]string)
+		}
+		collected[k] = v
+	}
 	if ackErr := taskQueue.Ack(t, result, usage, collected); ackErr != nil {
 		slog.Error("ack failed", "task_id", t.ID, "error", ackErr)
 	}
@@ -482,6 +496,40 @@ func collectArtifacts(ctx context.Context, cfg *config.Config, task queue.Task) 
 		return nil
 	}
 	return result
+}
+
+// saveOutputArtifact uploads the task's final output directly to the artifact
+// store when spec.runtime.artifacts.saveOutput is enabled. Returns the
+// artifact name->URL map to merge into the task result. Uploads directly
+// to the store without writing to disk.
+func saveOutputArtifact(ctx context.Context, cfg *config.Config, task queue.Task, output string) map[string]string {
+	if !cfg.ArtifactSaveOutput || cfg.ArtifactStoreURL == "" || output == "" {
+		return nil
+	}
+	store, err := artifacts.NewFromURL(cfg.ArtifactStoreURL)
+	if err != nil {
+		slog.Warn("artifact store unavailable for save-output", "url", cfg.ArtifactStoreURL, "error", err)
+		return nil
+	}
+	defer store.Close() //nolint:errcheck
+
+	runName := task.Meta["run_name"]
+	stepName := task.Meta["step_name"]
+	if runName == "" {
+		runName = task.ID
+	}
+	if stepName == "" {
+		stepName = cfg.TeamRole
+	}
+
+	fileName := "output" + cfg.ArtifactSaveExtension
+	url, err := store.Put(ctx, runName, stepName, fileName, []byte(output))
+	if err != nil {
+		slog.Warn("uploading output artifact", "error", err)
+		return nil
+	}
+	slog.Info("output artifact uploaded", "name", fileName, "url", url)
+	return map[string]string{fileName: url}
 }
 
 // goredisAdapter wraps a go-redis client to implement the audit.RedisClient interface.

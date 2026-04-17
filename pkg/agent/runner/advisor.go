@@ -191,12 +191,8 @@ func (r *Runner) callAdvisor(ctx context.Context, toolName string, input json.Ra
 
 	// Dispatch via MCP gateway REST endpoint to the advisor agent.
 	start := time.Now()
-	result, err := r.callAdvisorViaGateway(advisorCtx, cfg, prompt)
+	ar, err := r.callAdvisorViaGateway(advisorCtx, cfg, prompt)
 	elapsed := time.Since(start)
-
-	span.SetAttributes(
-		attribute.Int("kubeswarm.advisor.tokens.cumulative", int(tracker.CumulativeTokens(cfg.Name))),
-	)
 
 	if err != nil {
 		// Check if it was a timeout.
@@ -213,17 +209,38 @@ func (r *Runner) callAdvisor(ctx context.Context, toolName string, input json.Ra
 		return result, nil
 	}
 
-	span.SetAttributes(attribute.String("kubeswarm.advisor.outcome", "success"))
-	return result, nil
+	// Track token usage from the advisor response.
+	advisorTokens := int32(ar.Usage.InputTokens + ar.Usage.OutputTokens)
+	if advisorTokens > 0 {
+		if tokenErr := tracker.AddTokens(cfg.Name, advisorTokens, cfg.MaxAdvisorTokensPerTask); tokenErr != nil {
+			span.SetAttributes(attribute.String("kubeswarm.advisor.outcome", "token_limit_exceeded"))
+			span.SetStatus(codes.Error, "advisor token limit exceeded")
+			// Return the result but annotate that the token budget is now exhausted.
+			// The next call will be blocked by checkAndIncrement or the caller can
+			// inspect the cumulative count.
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Int("kubeswarm.advisor.tokens.cumulative", int(tracker.CumulativeTokens(cfg.Name))),
+		attribute.String("kubeswarm.advisor.outcome", "success"),
+	)
+	return ar.Output, nil
+}
+
+// advisorResult holds the output and token usage from an advisor call.
+type advisorResult struct {
+	Output string
+	Usage  queue.TokenUsage
 }
 
 // callAdvisorViaGateway submits a task to the advisor agent's queue and waits
 // for the result. The advisor agent processes the prompt using its own LLM
 // provider and returns the response through the same queue mechanism.
-func (r *Runner) callAdvisorViaGateway(ctx context.Context, cfg config.AdvisorConfig, prompt string) (string, error) {
+func (r *Runner) callAdvisorViaGateway(ctx context.Context, cfg config.AdvisorConfig, prompt string) (advisorResult, error) {
 	baseURL := r.cfg.TaskQueueURL
 	if baseURL == "" {
-		return "", fmt.Errorf("no queue URL configured")
+		return advisorResult{}, fmt.Errorf("no queue URL configured")
 	}
 
 	// Strip any existing stream param from the base URL to get the bare Redis URL,
@@ -233,7 +250,7 @@ func (r *Runner) callAdvisorViaGateway(ctx context.Context, cfg config.AdvisorCo
 
 	advisorQueue, err := queue.NewQueue(advisorQueueURL, 0)
 	if err != nil {
-		return "", fmt.Errorf("cannot connect to advisor queue: %v", err)
+		return advisorResult{}, fmt.Errorf("cannot connect to advisor queue: %v", err)
 	}
 	defer advisorQueue.Close()
 
@@ -242,7 +259,7 @@ func (r *Runner) callAdvisorViaGateway(ctx context.Context, cfg config.AdvisorCo
 		"caller":       r.cfg.AgentName,
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot submit to advisor: %v", err)
+		return advisorResult{}, fmt.Errorf("cannot submit to advisor: %v", err)
 	}
 
 	// Poll for the result within the advisor timeout.
@@ -252,16 +269,19 @@ func (r *Runner) callAdvisorViaGateway(ctx context.Context, cfg config.AdvisorCo
 	for {
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return advisorResult{}, ctx.Err()
 		case <-ticker.C:
 			results, err := advisorQueue.Results(ctx, []string{taskID})
 			if err != nil || len(results) == 0 {
 				continue // transient error or not ready yet, keep polling
 			}
 			if results[0].Error != "" {
-				return "", fmt.Errorf("advisor error: %s", results[0].Error)
+				return advisorResult{}, fmt.Errorf("advisor error: %s", results[0].Error)
 			}
-			return results[0].Output, nil
+			return advisorResult{
+				Output: results[0].Output,
+				Usage:  results[0].Usage,
+			}, nil
 		}
 	}
 }

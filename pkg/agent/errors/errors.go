@@ -60,6 +60,12 @@ var defaultSuggestions = map[ErrorCode]string{
 	ErrConfigMissing:      "Ensure required environment variables are set by the operator",
 }
 
+// SuggestionForCode returns the default user-facing suggestion for a given
+// error code. Returns an empty string for unknown codes.
+func SuggestionForCode(code ErrorCode) string {
+	return defaultSuggestions[code]
+}
+
 // AgentError is a structured error carrying a code, component, message,
 // suggestion, and optional wrapped cause.
 type AgentError struct {
