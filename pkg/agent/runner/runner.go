@@ -36,6 +36,7 @@ import (
 
 	agenterrors "github.com/kubeswarm/kubeswarm/pkg/agent/errors"
 
+	"github.com/kubeswarm/kubeswarm/pkg/agent/circuit"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/config"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/mcp"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/providers"
@@ -79,6 +80,7 @@ type Runner struct {
 	allTools       []mcp.Tool
 	webhookToolMap map[string]config.WebhookToolConfig // keyed by tool name for O(1) lookup
 	advisorTracker *advisorTracker                     // nil when no advisors configured (RFC-0048)
+	gatewayHandler *gatewayHandler                     // nil when not a gateway agent (RFC-0052)
 	metrics        *observability.AgentMetrics
 	metricAttrs    []attribute.KeyValue // namespace/agent/role label set
 	k8sEvents      *observability.AgentEventRecorder
@@ -88,6 +90,9 @@ type Runner struct {
 
 	// RFC-0026 deep-research hooks; all nil when loopPolicy is unset.
 	loopDedup bool // semantic dedup enabled for this runner
+
+	// circuitBreaker wraps tool calls; nil when not configured.
+	circuitBreaker *circuit.Breaker
 }
 
 // New creates a Runner, builds the merged tool list, and wires up the task queue
@@ -114,6 +119,25 @@ func New(cfg *config.Config, mcpManager *mcp.Manager, provider providers.LLMProv
 	if len(cfg.Advisors) > 0 {
 		r.advisorTracker = newAdvisorTracker(cfg.Advisors)
 	}
+	// RFC-0052: wire gateway tools and handler.
+	if len(cfg.GatewayCapabilities) > 0 || cfg.GatewayConfig != nil || len(cfg.GatewayTools) > 0 {
+		r.gatewayHandler = &gatewayHandler{
+			capabilities: cfg.GatewayCapabilities,
+			config:       cfg.GatewayConfig,
+			tools:        cfg.GatewayTools,
+			agentName:    cfg.AgentName,
+			namespace:    cfg.Namespace,
+			queueURL:     cfg.TaskQueueURL,
+		}
+	}
+	// Wire circuit breaker when configured.
+	if cfg.CircuitBreaker != nil {
+		r.circuitBreaker = circuit.NewBreaker(
+			cfg.CircuitBreaker.FailureThreshold,
+			cfg.CircuitBreaker.HalfOpenMaxCalls,
+			time.Duration(cfg.CircuitBreaker.CooldownSeconds)*time.Second,
+		)
+	}
 	return r
 }
 
@@ -137,6 +161,9 @@ func (r *Runner) buildTools() {
 
 	// RFC-0048: advisor tools injected from AGENT_ADVISORS config.
 	r.allTools = append(r.allTools, buildAdvisorTools(r.cfg.Advisors)...)
+
+	// RFC-0052: gateway tools injected from AGENT_GATEWAY_TOOLS config.
+	r.allTools = append(r.allTools, buildGatewayTools(r.cfg)...)
 
 	// Built-in: submit_subtask - only available when the task queue is wired in.
 	if r.taskQueue != nil {
@@ -259,8 +286,27 @@ func (r *Runner) CallTool(ctx context.Context, toolName string, input json.RawMe
 		return "", err
 	}
 
+	// Circuit breaker: reject the call if the circuit is open.
+	if r.circuitBreaker != nil {
+		if cbErr := r.circuitBreaker.Allow(); cbErr != nil {
+			span.RecordError(cbErr)
+			span.SetStatus(codes.Error, cbErr.Error())
+			return "", cbErr
+		}
+	}
+
 	result, err := r.callToolInner(ctx, toolName, input)
 	durationMs := time.Since(start).Milliseconds()
+
+	// Circuit breaker: record success/failure.
+	if r.circuitBreaker != nil {
+		if err != nil {
+			r.circuitBreaker.RecordFailure()
+		} else {
+			r.circuitBreaker.RecordSuccess()
+		}
+	}
+
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -319,11 +365,28 @@ func (r *Runner) isAdvisorTool(name string) bool {
 	return ok
 }
 
+func (r *Runner) isGatewayTool(name string) bool {
+	if r.gatewayHandler == nil {
+		return false
+	}
+	return name == gatewayToolSearch || name == gatewayToolDispatch
+}
+
 func (r *Runner) callToolInner(ctx context.Context, toolName string, input json.RawMessage) (string, error) {
 	// RFC-0048: advisor tool dispatch.
 	if r.advisorTracker != nil {
 		if _, ok := r.advisorTracker.isAdvisorTool(toolName); ok {
 			return r.callAdvisor(ctx, toolName, input, r.advisorTracker)
+		}
+	}
+
+	// RFC-0052: gateway tool dispatch.
+	if r.gatewayHandler != nil {
+		if toolName == gatewayToolSearch {
+			return r.gatewayHandler.registrySearch(input)
+		}
+		if toolName == gatewayToolDispatch {
+			return r.gatewayHandler.dispatch(ctx, input)
 		}
 	}
 
@@ -436,6 +499,11 @@ func (r *Runner) RunTask(ctx context.Context, task queue.Task) (string, queue.To
 	// remain connected across Redis queue boundaries.
 	ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(task.Meta))
 	ctx = context.WithValue(ctx, taskIDKey, task.ID)
+
+	// RFC-0052: reset per-task gateway dispatch counters and read incoming depth.
+	if r.gatewayHandler != nil {
+		r.gatewayHandler.resetPerTask(task.Meta)
+	}
 
 	// Audit: task.received (RFC-0030).
 	if r.auditEmitter != nil {
