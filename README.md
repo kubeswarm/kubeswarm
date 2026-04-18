@@ -14,7 +14,7 @@
 
 Kubernetes operator that manages AI agents as first-class resources. Define agents in YAML, connect MCP tools, compose multi-agent pipelines, and operate with the same tooling you already use for services.
 
-> **Status: v0.1.0-alpha** - Core primitives are functional. API is `v1alpha1` and may change between minor versions. Not recommended for production workloads yet. See [VERSIONING.md](./VERSIONING.md).
+> **Status: v0.2.0-alpha** - Core primitives are functional. API is `v1alpha1` and may change between minor versions. Not recommended for production workloads yet. See [VERSIONING.md](./VERSIONING.md).
 
 ---
 
@@ -22,26 +22,29 @@ Kubernetes operator that manages AI agents as first-class resources. Define agen
 
 kubeswarm introduces CRDs that model every part of an AI agent deployment:
 
-| CRD | Purpose |
-|-----|---------|
-| **SwarmAgent** | LLM agent with model, system prompt, MCP tools, guardrails, and autoscaling |
-| **SwarmTeam** | Multi-agent pipeline (DAG, sequential, or LLM-routed) |
-| **SwarmRun** | Single execution of a team pipeline with audit trail |
-| **SwarmBudget** | Token spend tracking and enforcement per team/namespace |
-| **SwarmRegistry** | Agent capability discovery and delegation |
-| **SwarmSettings** | Shared configuration (MCP servers, context policies) |
-| **SwarmMemory** | Vector memory backends (pgvector, Qdrant) for agent recall |
-| **SwarmEvent** | Trigger pipeline runs from external events (webhooks, cron) |
-| **SwarmNotify** | Run completion notifications (webhook, Slack) |
+| CRD               | Purpose                                                                     |
+| ----------------- | --------------------------------------------------------------------------- |
+| **SwarmAgent**    | LLM agent with model, system prompt, MCP tools, guardrails, and autoscaling |
+| **SwarmTeam**     | Multi-agent pipeline (DAG, sequential, or LLM-routed)                       |
+| **SwarmRun**      | Single execution of a team pipeline with audit trail                        |
+| **SwarmBudget**   | Token spend tracking and enforcement per team/namespace                     |
+| **SwarmRegistry** | Agent capability discovery and delegation                                   |
+| **SwarmSettings** | Shared configuration (MCP servers, context policies)                        |
+| **SwarmMemory**   | Vector memory backends (pgvector, Qdrant) for agent recall                  |
+| **SwarmEvent**    | Trigger pipeline runs from external events (webhooks, cron)                 |
+| **SwarmNotify**   | Run completion notifications (webhook, Slack)                               |
+| **SwarmPolicy**   | Governance constraints (model allow/deny, token limits, tool restrictions)  |
 
 All resources are namespace-scoped. `kubectl get kubeswarm -A` shows everything.
 
 ## Key features
 
 - **Multi-provider** - Anthropic, OpenAI, Google Gemini, or any provider via gRPC plugin
+- **Reasoning support** - Anthropic extended thinking, OpenAI reasoning effort, guardrail clamping
 - **MCP tool integration** - connect any MCP server; dynamic tool discovery; per-tool trust levels
-- **Agent-to-agent** - agents call other agents as tools with advisor pattern for multi-model collaboration
+- **Agent-to-agent** - gateway dispatch, advisor consultations, and capability-based routing across agents
 - **Pipeline orchestration** - DAG-based, sequential, or LLM-routed dispatch with step validation
+- **Governance** - SwarmPolicy enforces model allow/deny lists, token limits, and tool restrictions across namespaces
 - **Cost controls** - per-agent token limits, daily budgets, circuit breakers, spend tracking
 - **Observability** - OTel metrics and traces, structured audit trail, MCP health monitoring
 - **Security** - pod hardening, network policies, prompt injection defense, tool allow/deny lists
@@ -131,12 +134,13 @@ tree clean.
 
 ## Related repos
 
-| Repo | Description |
-|------|------------|
-| [helm-charts](https://github.com/kubeswarm/helm-charts) | Helm chart for operator deployment |
-| [kubeswarm-cli](https://github.com/kubeswarm/kubeswarm-cli) | Local dev CLI (`swarm run`, `swarm trigger`) |
-| [kubeswarm-docs](https://github.com/kubeswarm/kubeswarm-docs) | Documentation site (docs.kubeswarm.io) |
-| [kubeswarm-cookbook](https://github.com/kubeswarm/kubeswarm-cookbook) | Example pipelines and recipes |
+| Repo                                                                  | Description                                  |
+| --------------------------------------------------------------------- | -------------------------------------------- |
+| [helm-charts](https://github.com/kubeswarm/helm-charts)               | Helm chart for operator deployment           |
+| [kubeswarm-cli](https://github.com/kubeswarm/kubeswarm-cli)           | Local dev CLI (`swarm run`, `swarm trigger`) |
+| [kubeswarm-docs](https://github.com/kubeswarm/kubeswarm-docs)         | Documentation site (docs.kubeswarm.io)       |
+| [kubeswarm-cookbook](https://github.com/kubeswarm/kubeswarm-cookbook) | Example pipelines and recipes                |
+
 ## Contributing
 
 Issues, ideas and PRs are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
