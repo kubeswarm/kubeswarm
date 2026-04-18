@@ -74,7 +74,7 @@ func startProbe(t *testing.T, r *runner.Runner, validatorPrompt string) string {
 		t.Fatalf("listen: %v", err)
 	}
 	addr := ln.Addr().String()
-	ln.Close()
+	_ = ln.Close()
 
 	go health.ServeProbe(addr, r, validatorPrompt)
 
@@ -83,7 +83,7 @@ func startProbe(t *testing.T, r *runner.Runner, validatorPrompt string) string {
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond)
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
 			return "http://" + addr
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -92,13 +92,15 @@ func startProbe(t *testing.T, r *runner.Runner, validatorPrompt string) string {
 	return ""
 }
 
+const readyBody = "ready"
+
 func getStatus(t *testing.T, url string) (int, string) {
 	t.Helper()
 	resp, err := http.Get(url) //nolint:gosec
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(body)
 }
@@ -128,8 +130,8 @@ func TestPingProbe_Healthz(t *testing.T) {
 	if code != http.StatusOK {
 		t.Errorf("/readyz ping status = %d, want 200", code)
 	}
-	if body != "ready" {
-		t.Errorf("/readyz ping body = %q, want %q", body, "ready")
+	if body != readyBody {
+		t.Errorf("/readyz ping body = %q, want %q", body, readyBody)
 	}
 }
 
@@ -148,8 +150,8 @@ func TestSemanticProbe_Healthy(t *testing.T) {
 	if code != http.StatusOK {
 		t.Errorf("/readyz semantic status = %d, want 200; body: %s", code, body)
 	}
-	if body != "ready" {
-		t.Errorf("/readyz body = %q, want %q", body, "ready")
+	if body != readyBody {
+		t.Errorf("/readyz body = %q, want %q", body, readyBody)
 	}
 }
 
@@ -163,7 +165,7 @@ func TestSemanticProbe_Unhealthy(t *testing.T) {
 	if code != http.StatusServiceUnavailable {
 		t.Errorf("/readyz status = %d, want 503", code)
 	}
-	if body == "ready" {
+	if body == readyBody {
 		t.Error("/readyz returned 'ready' for unhealthy response")
 	}
 }
@@ -177,7 +179,7 @@ func TestSemanticProbe_Error(t *testing.T) {
 	if code != http.StatusServiceUnavailable {
 		t.Errorf("/readyz status = %d, want 503", code)
 	}
-	if body == "ready" {
+	if body == readyBody {
 		t.Error("/readyz returned 'ready' when RunTask errored")
 	}
 }

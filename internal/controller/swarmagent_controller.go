@@ -1412,38 +1412,7 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 		{Name: "AGENT_NAME", Value: swarmAgent.Name},
 	}
 
-	// Propagate the custom validator prompt when a semantic liveness probe is configured.
-	if swarmAgent.Spec.Observability != nil &&
-		swarmAgent.Spec.Observability.HealthCheck != nil &&
-		swarmAgent.Spec.Observability.HealthCheck.Type == kubeswarmv1alpha1.HealthCheckSemantic &&
-		swarmAgent.Spec.Observability.HealthCheck.Prompt != "" {
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  "AGENT_VALIDATOR_PROMPT",
-			Value: swarmAgent.Spec.Observability.HealthCheck.Prompt,
-		})
-	}
-
-	// Propagate logging configuration when spec.observability.logging is set.
-	if swarmAgent.Spec.Observability != nil && swarmAgent.Spec.Observability.Logging != nil {
-		logging := swarmAgent.Spec.Observability.Logging
-		if logging.Level != "" {
-			envVars = append(envVars, corev1.EnvVar{Name: "AGENT_LOG_LEVEL", Value: string(logging.Level)})
-		}
-		if logging.ToolCalls {
-			envVars = append(envVars, corev1.EnvVar{Name: "AGENT_LOG_TOOL_CALLS", Value: "true"})
-		}
-		if logging.LLMTurns {
-			envVars = append(envVars, corev1.EnvVar{Name: "AGENT_LOG_LLM_TURNS", Value: "true"})
-		}
-		if logging.Redaction != nil {
-			if logging.Redaction.Secrets {
-				envVars = append(envVars, corev1.EnvVar{Name: "AGENT_LOG_REDACT_SECRETS", Value: "true"})
-			}
-			if logging.Redaction.PII {
-				envVars = append(envVars, corev1.EnvVar{Name: "AGENT_LOG_REDACT_PII", Value: "true"})
-			}
-		}
-	}
+	envVars = append(envVars, buildObservabilityEnvVars(swarmAgent)...)
 
 	// Inject env vars forwarded from the operator pod via SWARM_AGENT_INJECT_* prefix.
 	// These allow cluster-wide agent defaults (e.g. OPENAI_BASE_URL, AGENT_PROVIDER)
@@ -1476,43 +1445,7 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 	envVars = append(envVars, buildArtifactEnvVars(swarmAgent)...)
 	envVars = append(envVars, buildPluginEnvVars(swarmAgent)...)
 
-	// Inject reasoning configuration env vars (RFC-0033). Only set fields that
-	// are explicitly populated on the SwarmAgent; unset fields fall through to
-	// provider defaults.
-	if rc := mergeReasoningConfig(swarmAgent.Spec.Reasoning, allSettings); rc != nil {
-		if rc.Mode != "" {
-			envVars = append(envVars, corev1.EnvVar{Name: "AGENT_REASONING_MODE", Value: string(rc.Mode)})
-		}
-		if rc.Effort != "" {
-			envVars = append(envVars, corev1.EnvVar{Name: "AGENT_REASONING_EFFORT", Value: string(rc.Effort)})
-		}
-		if rc.BudgetTokens != nil {
-			envVars = append(envVars, corev1.EnvVar{
-				Name:  "AGENT_REASONING_BUDGET_TOKENS",
-				Value: strconv.FormatInt(int64(*rc.BudgetTokens), 10),
-			})
-		}
-	}
-	{
-		var thinkingTokens, answerTokens *int32
-		if g := swarmAgent.Spec.Guardrails; g != nil && g.Limits != nil {
-			thinkingTokens = g.Limits.MaxThinkingTokensPerCall
-			answerTokens = g.Limits.MaxAnswerTokensPerCall
-		}
-		thinkingTokens, answerTokens = applyPolicyThinkingLimits(thinkingTokens, answerTokens, effectivePolicy)
-		if thinkingTokens != nil {
-			envVars = append(envVars, corev1.EnvVar{
-				Name:  "AGENT_MAX_THINKING_TOKENS_PER_CALL",
-				Value: strconv.FormatInt(int64(*thinkingTokens), 10),
-			})
-		}
-		if answerTokens != nil {
-			envVars = append(envVars, corev1.EnvVar{
-				Name:  "AGENT_MAX_ANSWER_TOKENS_PER_CALL",
-				Value: strconv.FormatInt(int64(*answerTokens), 10),
-			})
-		}
-	}
+	envVars = append(envVars, buildReasoningEnvVars(swarmAgent, allSettings, effectivePolicy)...)
 
 	// Inject policy-specific env vars (tool deny, trust level, deny patterns).
 	envVars = append(envVars, buildPolicyEnvVars(effectivePolicy)...)
@@ -1537,20 +1470,7 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 		})
 	}
 
-	// Inject circuit breaker config when configured in guardrails.
-	if swarmAgent.Spec.Guardrails != nil && swarmAgent.Spec.Guardrails.Limits != nil &&
-		swarmAgent.Spec.Guardrails.Limits.CircuitBreaker != nil {
-		cb := swarmAgent.Spec.Guardrails.Limits.CircuitBreaker
-		cbJSON, _ := json.Marshal(map[string]int{
-			"failureThreshold": cb.FailureThreshold,
-			"cooldownSeconds":  cb.CooldownSeconds,
-			"halfOpenMaxCalls": cb.HalfOpenMaxCalls,
-		})
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  "AGENT_CIRCUIT_BREAKER",
-			Value: string(cbJSON),
-		})
-	}
+	envVars = append(envVars, buildCircuitBreakerEnvVars(swarmAgent)...)
 
 	// Inject advisor connection configs as JSON (RFC-0048).
 	envVars = append(envVars, buildAdvisorEnvVars(swarmAgent)...)
@@ -1571,6 +1491,100 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 		}
 	}
 	return out
+}
+
+// buildObservabilityEnvVars returns env vars for health check and logging configuration.
+func buildObservabilityEnvVars(swarmAgent *kubeswarmv1alpha1.SwarmAgent) []corev1.EnvVar {
+	if swarmAgent.Spec.Observability == nil {
+		return nil
+	}
+	var out []corev1.EnvVar
+
+	if hc := swarmAgent.Spec.Observability.HealthCheck; hc != nil &&
+		hc.Type == kubeswarmv1alpha1.HealthCheckSemantic && hc.Prompt != "" {
+		out = append(out, corev1.EnvVar{Name: "AGENT_VALIDATOR_PROMPT", Value: hc.Prompt})
+	}
+
+	if logging := swarmAgent.Spec.Observability.Logging; logging != nil {
+		if logging.Level != "" {
+			out = append(out, corev1.EnvVar{Name: "AGENT_LOG_LEVEL", Value: string(logging.Level)})
+		}
+		if logging.ToolCalls {
+			out = append(out, corev1.EnvVar{Name: "AGENT_LOG_TOOL_CALLS", Value: "true"})
+		}
+		if logging.LLMTurns {
+			out = append(out, corev1.EnvVar{Name: "AGENT_LOG_LLM_TURNS", Value: "true"})
+		}
+		if logging.Redaction != nil {
+			if logging.Redaction.Secrets {
+				out = append(out, corev1.EnvVar{Name: "AGENT_LOG_REDACT_SECRETS", Value: "true"})
+			}
+			if logging.Redaction.PII {
+				out = append(out, corev1.EnvVar{Name: "AGENT_LOG_REDACT_PII", Value: "true"})
+			}
+		}
+	}
+	return out
+}
+
+// buildReasoningEnvVars returns env vars for reasoning configuration (RFC-0033)
+// and thinking/answer token guardrail limits.
+func buildReasoningEnvVars(
+	swarmAgent *kubeswarmv1alpha1.SwarmAgent,
+	allSettings []kubeswarmv1alpha1.SwarmSettings,
+	effectivePolicy *kubeswarmv1alpha1.EffectivePolicySpec,
+) []corev1.EnvVar {
+	var out []corev1.EnvVar
+
+	if rc := mergeReasoningConfig(swarmAgent.Spec.Reasoning, allSettings); rc != nil {
+		if rc.Mode != "" {
+			out = append(out, corev1.EnvVar{Name: "AGENT_REASONING_MODE", Value: string(rc.Mode)})
+		}
+		if rc.Effort != "" {
+			out = append(out, corev1.EnvVar{Name: "AGENT_REASONING_EFFORT", Value: string(rc.Effort)})
+		}
+		if rc.BudgetTokens != nil {
+			out = append(out, corev1.EnvVar{
+				Name:  "AGENT_REASONING_BUDGET_TOKENS",
+				Value: strconv.FormatInt(int64(*rc.BudgetTokens), 10),
+			})
+		}
+	}
+
+	var thinkingTokens, answerTokens *int32
+	if g := swarmAgent.Spec.Guardrails; g != nil && g.Limits != nil {
+		thinkingTokens = g.Limits.MaxThinkingTokensPerCall
+		answerTokens = g.Limits.MaxAnswerTokensPerCall
+	}
+	thinkingTokens, answerTokens = applyPolicyThinkingLimits(thinkingTokens, answerTokens, effectivePolicy)
+	if thinkingTokens != nil {
+		out = append(out, corev1.EnvVar{
+			Name:  "AGENT_MAX_THINKING_TOKENS_PER_CALL",
+			Value: strconv.FormatInt(int64(*thinkingTokens), 10),
+		})
+	}
+	if answerTokens != nil {
+		out = append(out, corev1.EnvVar{
+			Name:  "AGENT_MAX_ANSWER_TOKENS_PER_CALL",
+			Value: strconv.FormatInt(int64(*answerTokens), 10),
+		})
+	}
+	return out
+}
+
+// buildCircuitBreakerEnvVars returns the AGENT_CIRCUIT_BREAKER env var when configured.
+func buildCircuitBreakerEnvVars(swarmAgent *kubeswarmv1alpha1.SwarmAgent) []corev1.EnvVar {
+	if swarmAgent.Spec.Guardrails == nil || swarmAgent.Spec.Guardrails.Limits == nil ||
+		swarmAgent.Spec.Guardrails.Limits.CircuitBreaker == nil {
+		return nil
+	}
+	cb := swarmAgent.Spec.Guardrails.Limits.CircuitBreaker
+	cbJSON, _ := json.Marshal(map[string]int{
+		"failureThreshold": cb.FailureThreshold,
+		"cooldownSeconds":  cb.CooldownSeconds,
+		"halfOpenMaxCalls": cb.HalfOpenMaxCalls,
+	})
+	return []corev1.EnvVar{{Name: "AGENT_CIRCUIT_BREAKER", Value: string(cbJSON)}}
 }
 
 // buildTeamEnvVars returns env vars derived from SwarmTeam annotations/labels.
