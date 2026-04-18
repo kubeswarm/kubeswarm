@@ -162,6 +162,9 @@ func TestSwarmMemoryController(t *testing.T) {
 						Endpoint:   "http://qdrant.qdrant.svc.cluster.local:6333",
 						Collection: "agent-memories",
 					},
+					Embedding: &kubeswarmv1alpha1.EmbeddingConfig{
+						Model: "text-embedding-3-small",
+					},
 				},
 			}))
 
@@ -182,6 +185,9 @@ func TestSwarmMemoryController(t *testing.T) {
 				Spec: kubeswarmv1alpha1.SwarmMemorySpec{
 					Backend: kubeswarmv1alpha1.MemoryBackendVectorStore,
 					// VectorStore field intentionally omitted
+					Embedding: &kubeswarmv1alpha1.EmbeddingConfig{
+						Model: "text-embedding-3-small",
+					},
 				},
 			}))
 
@@ -205,6 +211,9 @@ func TestSwarmMemoryController(t *testing.T) {
 					VectorStore: &kubeswarmv1alpha1.VectorStoreMemoryConfig{
 						Provider: kubeswarmv1alpha1.VectorStoreProviderQdrant,
 						Endpoint: "", // missing
+					},
+					Embedding: &kubeswarmv1alpha1.EmbeddingConfig{
+						Model: "text-embedding-3-small",
 					},
 				},
 			}))
