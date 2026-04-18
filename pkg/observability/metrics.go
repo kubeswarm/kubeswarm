@@ -18,6 +18,7 @@ package observability
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -60,6 +61,11 @@ type AgentMetrics struct {
 	agentErrors metric.Int64Counter
 
 	circuitRejected metric.Int64Counter
+
+	// RFC-0048: advisor metrics.
+	advisorCalls    metric.Int64Counter
+	advisorDuration metric.Int64Histogram
+	advisorErrors   metric.Int64Counter
 }
 
 // NewAgentMetrics creates and registers all agent runtime instruments.
@@ -162,7 +168,36 @@ func NewAgentMetrics() (*AgentMetrics, error) {
 		return nil, err
 	}
 
+	// RFC-0048: advisor metrics.
+	if am.advisorCalls, err = m.Int64Counter("kubeswarm.advisor.calls",
+		metric.WithDescription("Advisor consultation calls")); err != nil {
+		return nil, err
+	}
+	if am.advisorDuration, err = m.Int64Histogram("kubeswarm.advisor.duration_ms",
+		metric.WithDescription("Advisor call duration in milliseconds")); err != nil {
+		return nil, err
+	}
+	if am.advisorErrors, err = m.Int64Counter("kubeswarm.advisor.errors",
+		metric.WithDescription("Advisor calls that returned errors")); err != nil {
+		return nil, err
+	}
+
 	return am, nil
+}
+
+var (
+	agentMetricsOnce   sync.Once
+	globalAgentMetrics *AgentMetrics
+)
+
+// DefaultAgentMetrics returns a process-wide singleton AgentMetrics, creating it once.
+// Callers that need custom attributes per agent should use the metrics attrs pattern;
+// instruments are shared, only labels differ.
+func DefaultAgentMetrics() *AgentMetrics {
+	agentMetricsOnce.Do(func() {
+		globalAgentMetrics, _ = NewAgentMetrics()
+	})
+	return globalAgentMetrics
 }
 
 // RecordTaskStarted increments the started counter.
@@ -271,6 +306,15 @@ func (am *AgentMetrics) RecordDelegate(ctx context.Context, attrs ...attribute.K
 	am.delegateSubmitted.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
+// RecordAdvisorCall records an advisor consultation call (RFC-0048).
+func (am *AgentMetrics) RecordAdvisorCall(ctx context.Context, since time.Time, failed bool, attrs ...attribute.KeyValue) {
+	am.advisorCalls.Add(ctx, 1, metric.WithAttributes(attrs...))
+	am.advisorDuration.Record(ctx, time.Since(since).Milliseconds(), metric.WithAttributes(attrs...))
+	if failed {
+		am.advisorErrors.Add(ctx, 1, metric.WithAttributes(attrs...))
+	}
+}
+
 // RecordToolRefresh increments the MCP tool list refresh counter.
 func (am *AgentMetrics) RecordToolRefresh(ctx context.Context, attrs ...attribute.KeyValue) {
 	am.toolRefreshes.Add(ctx, 1, metric.WithAttributes(attrs...))
@@ -291,6 +335,12 @@ func (am *AgentMetrics) RecordCircuitRejected(ctx context.Context, attrs ...attr
 type OperatorMetrics struct {
 	reconcileDuration metric.Int64Histogram
 	reconcileErrors   metric.Int64Counter
+
+	policyViolation            metric.Int64Counter
+	policyConflict             metric.Int64Counter
+	policyAdmissionRejected    metric.Int64Counter
+	policyAdmissionWarned      metric.Int64Counter
+	policyAdmissionWouldReject metric.Int64Counter
 }
 
 // NewOperatorMetrics creates and registers all operator instruments.
@@ -308,6 +358,26 @@ func NewOperatorMetrics() (*OperatorMetrics, error) {
 		metric.WithDescription("Reconcile loops that returned an error")); err != nil {
 		return nil, err
 	}
+	if om.policyViolation, err = m.Int64Counter("kubeswarm.policy.violation",
+		metric.WithDescription("Policy violations detected on agents")); err != nil {
+		return nil, err
+	}
+	if om.policyConflict, err = m.Int64Counter("kubeswarm.policy.conflict",
+		metric.WithDescription("Merged policies with impossible constraints")); err != nil {
+		return nil, err
+	}
+	if om.policyAdmissionRejected, err = m.Int64Counter("kubeswarm.policy.admission.rejected",
+		metric.WithDescription("Agents rejected by policy webhook in Enforce mode")); err != nil {
+		return nil, err
+	}
+	if om.policyAdmissionWarned, err = m.Int64Counter("kubeswarm.policy.admission.warned",
+		metric.WithDescription("Agents warned by policy webhook in Warn mode")); err != nil {
+		return nil, err
+	}
+	if om.policyAdmissionWouldReject, err = m.Int64Counter("kubeswarm.policy.admission.would_reject",
+		metric.WithDescription("Agents that would be rejected in Audit mode")); err != nil {
+		return nil, err
+	}
 	return om, nil
 }
 
@@ -318,4 +388,34 @@ func (om *OperatorMetrics) RecordReconcile(ctx context.Context, since time.Time,
 	if failed {
 		om.reconcileErrors.Add(ctx, 1, opt)
 	}
+}
+
+// RecordPolicyViolation increments the policy violation counter with policy/agent/constraint labels.
+func (om *OperatorMetrics) RecordPolicyViolation(ctx context.Context, policyName, agentName, constraint string, attrs ...attribute.KeyValue) {
+	all := append([]attribute.KeyValue{
+		attribute.String("policy_name", policyName),
+		attribute.String("agent_name", agentName),
+		attribute.String("constraint", constraint),
+	}, attrs...)
+	om.policyViolation.Add(ctx, 1, metric.WithAttributes(all...))
+}
+
+// RecordPolicyConflict increments the policy conflict counter.
+func (om *OperatorMetrics) RecordPolicyConflict(ctx context.Context, attrs ...attribute.KeyValue) {
+	om.policyConflict.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordPolicyAdmissionRejected increments the Enforce-mode rejection counter.
+func (om *OperatorMetrics) RecordPolicyAdmissionRejected(ctx context.Context, attrs ...attribute.KeyValue) {
+	om.policyAdmissionRejected.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordPolicyAdmissionWarned increments the Warn-mode warning counter.
+func (om *OperatorMetrics) RecordPolicyAdmissionWarned(ctx context.Context, attrs ...attribute.KeyValue) {
+	om.policyAdmissionWarned.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordPolicyAdmissionWouldReject increments the Audit-mode would-reject counter.
+func (om *OperatorMetrics) RecordPolicyAdmissionWouldReject(ctx context.Context, attrs ...attribute.KeyValue) {
+	om.policyAdmissionWouldReject.Add(ctx, 1, metric.WithAttributes(attrs...))
 }

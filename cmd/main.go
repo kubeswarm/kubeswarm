@@ -268,6 +268,8 @@ func Run() {
 		os.Exit(1)
 	}
 
+	notifyDispatcher := controller.NewNotifyDispatcher(mgr.GetClient())
+
 	if err := (&controller.SwarmAgentReconciler{
 		Client:               mgr.GetClient(),
 		Scheme:               mgr.GetScheme(),
@@ -275,6 +277,7 @@ func Run() {
 		AgentImagePullPolicy: corev1.PullPolicy(agentImagePullPolicy),
 		MCPGatewayURL:        mcpGatewayURL,
 		OperatorNamespace:    os.Getenv("POD_NAMESPACE"),
+		NotifyDispatcher:     notifyDispatcher,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "SwarmAgent")
 		os.Exit(1)
@@ -413,7 +416,7 @@ func Run() {
 	// AUDIT_LOG_SINK from Helm values (env vars injected by the Helm chart).
 	// The emitter is shared across all controllers; nil when mode is "off" or unset.
 	var operatorAuditEmitter *audit.Emitter
-	if auditMode := os.Getenv("AUDIT_LOG_MODE"); auditMode != "" && auditMode != "off" {
+	if auditMode := os.Getenv("AUDIT_LOG_MODE"); auditMode != "" && auditMode != string(audit.ModeOff) {
 		var sink audit.AuditSink
 		switch sinkType := os.Getenv("AUDIT_LOG_SINK"); sinkType {
 		case "stdout", "":
@@ -440,8 +443,6 @@ func Run() {
 		setupLog.Info("Audit emitter enabled for operator", "mode", auditMode)
 	}
 
-	notifyDispatcher := controller.NewNotifyDispatcher(mgr.GetClient())
-
 	// Shared capability registry - maintained by SwarmRegistryReconciler, read by SwarmRunReconciler.
 	capRegistry := &registry.Registry{}
 	if err := (&controller.SwarmRegistryReconciler{
@@ -459,7 +460,7 @@ func Run() {
 	// The hardStop decision is per-SwarmBudget, read from BudgetInput.HardStop
 	// on each evaluation. Callers populate input.HardStop from b.Spec.HardStop.
 	budgetPolicy := costs.NewHardStopPolicy(
-		costs.DefaultBudgetPolicy(),
+		&costs.StandardBudgetPolicy{},
 		resilientSpendStore.IsHealthy,
 	)
 
@@ -514,6 +515,14 @@ func Run() {
 		setupLog.Error(err, "Failed to create controller", "controller", "SwarmTeam")
 		os.Exit(1)
 	}
+	if err := (&controller.SwarmPolicyReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorder("swarmpolicy-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "SwarmPolicy")
+		os.Exit(1)
+	}
 
 	// Start the trigger webhook HTTP server as a manager Runnable so it
 	// shares the manager's lifecycle (graceful shutdown on signal).
@@ -555,7 +564,15 @@ func Run() {
 			"/validate-kubeswarm-v1alpha1-swarmagent",
 			&webhook.Admission{Handler: swarmbhook.NewSwarmAgentPromptValidator(promptDecoder, mgr.GetClient())},
 		)
-		setupLog.Info("Prompt size admission webhooks registered")
+		mgr.GetWebhookServer().Register(
+			"/validate-kubeswarm-v1alpha1-swarmagent-policy",
+			&webhook.Admission{Handler: swarmbhook.NewSwarmAgentPolicyValidator(promptDecoder, mgr.GetClient())},
+		)
+		mgr.GetWebhookServer().Register(
+			"/validate-kubeswarm-v1alpha1-swarmteam-policy",
+			&webhook.Admission{Handler: swarmbhook.NewSwarmTeamPolicyValidator(promptDecoder, mgr.GetClient())},
+		)
+		setupLog.Info("Prompt size and policy admission webhooks registered")
 	} else {
 		setupLog.Info("Admission webhooks disabled")
 	}
@@ -594,7 +611,8 @@ func Run() {
 	}
 	auditProbe := healthz.NewChecker(healthz.RoleAudit, healthFuncProbe(func() bool {
 		// Audit is healthy when it is either not configured (off) or configured and running.
-		return operatorAuditEmitter != nil || os.Getenv("AUDIT_LOG_MODE") == "" || os.Getenv("AUDIT_LOG_MODE") == "off"
+		auditMode := os.Getenv("AUDIT_LOG_MODE")
+		return operatorAuditEmitter != nil || auditMode == "" || auditMode == string(audit.ModeOff)
 	}))
 	if err := mgr.AddReadyzCheck(auditProbe.Name(), auditProbe.Check); err != nil {
 		setupLog.Error(err, "Failed to add audit readyz check")

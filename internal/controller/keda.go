@@ -25,6 +25,8 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -47,6 +49,20 @@ const defaultPendingTasks = int32(5)
 
 const defaultTaskStream = "agent-tasks"
 
+// cachedInjectQueueURL caches SWARM_AGENT_INJECT_TASK_QUEUE_URL at first access.
+// The env var is set at operator startup and never changes at runtime.
+var (
+	injectQueueURLOnce  sync.Once
+	injectQueueURLValue string
+)
+
+func cachedInjectQueueURL() string {
+	injectQueueURLOnce.Do(func() {
+		injectQueueURLValue = os.Getenv("SWARM_AGENT_INJECT_TASK_QUEUE_URL")
+	})
+	return injectQueueURLValue
+}
+
 // reconcileKEDA creates, updates, or deletes the KEDA ScaledObject for agent.
 // It is a no-op (with a log warning) when KEDA is not installed in the cluster.
 func (r *SwarmAgentReconciler) reconcileKEDA(ctx context.Context, agent *kubeswarmv1alpha1.SwarmAgent) error {
@@ -55,7 +71,7 @@ func (r *SwarmAgentReconciler) reconcileKEDA(ctx context.Context, agent *kubeswa
 	// When budget is exceeded, buildDeployment sets replicas=0. Delete the
 	// ScaledObject so KEDA's minReplicas does not override the scale-to-zero.
 	// The next reconcile after BudgetExceeded clears will recreate it.
-	if apimeta.IsStatusConditionTrue(agent.Status.Conditions, "BudgetExceeded") {
+	if apimeta.IsStatusConditionTrue(agent.Status.Conditions, kubeswarmv1alpha1.ConditionBudgetExceeded) {
 		return r.deleteScaledObjectIfExists(ctx, agent)
 	}
 
@@ -161,11 +177,11 @@ func buildScaledObject(agent *kubeswarmv1alpha1.SwarmAgent, redisAddr, streamNam
 // Priority: team queue URL annotation → operator inject env var.
 func resolveRedisAddress(agent *kubeswarmv1alpha1.SwarmAgent) string {
 	// Team-member agents have a per-role queue URL injected as an annotation.
-	if queueURL, ok := agent.Annotations[annotationTeamQueueURL]; ok && queueURL != "" {
+	if queueURL, ok := agent.Annotations[kubeswarmv1alpha1.AnnotationTeamQueueURL]; ok && queueURL != "" {
 		return stripStreamParam(queueURL)
 	}
 	// Operator-wide injection via SWARM_AGENT_INJECT_TASK_QUEUE_URL.
-	if injected := os.Getenv("SWARM_AGENT_INJECT_TASK_QUEUE_URL"); injected != "" {
+	if injected := cachedInjectQueueURL(); injected != "" {
 		return stripStreamParam(injected)
 	}
 	return ""
@@ -174,9 +190,9 @@ func resolveRedisAddress(agent *kubeswarmv1alpha1.SwarmAgent) string {
 // resolveStreamName derives the Redis stream name from the queue URL.
 // Falls back to the default defaultTaskStream stream.
 func resolveStreamName(agent *kubeswarmv1alpha1.SwarmAgent) string {
-	queueURL := agent.Annotations[annotationTeamQueueURL]
+	queueURL := agent.Annotations[kubeswarmv1alpha1.AnnotationTeamQueueURL]
 	if queueURL == "" {
-		queueURL = os.Getenv("SWARM_AGENT_INJECT_TASK_QUEUE_URL")
+		queueURL = cachedInjectQueueURL()
 	}
 	if queueURL == "" {
 		return defaultTaskStream
@@ -234,25 +250,9 @@ func isNoMatchError(err error) bool {
 	if err == nil {
 		return false
 	}
-	return isNoMatchErrorString(err.Error())
-}
-
-func isNoMatchErrorString(msg string) bool {
-	return contains(msg, "no kind is registered") ||
-		contains(msg, "no matches for kind") ||
-		contains(msg, "no resources found") ||
-		contains(msg, "the server could not find the requested resource")
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsHelper(s, sub))
-}
-
-func containsHelper(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
+	msg := err.Error()
+	return strings.Contains(msg, "no kind is registered") ||
+		strings.Contains(msg, "no matches for kind") ||
+		strings.Contains(msg, "no resources found") ||
+		strings.Contains(msg, "the server could not find the requested resource")
 }

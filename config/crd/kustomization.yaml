@@ -11,6 +11,7 @@ resources:
   - bases/kubeswarm.io_swarmbudgets.yaml
   - bases/kubeswarm.io_swarmregistries.yaml
   - bases/kubeswarm.io_swarmnotifies.yaml
+  - bases/kubeswarm.io_swarmpolicies.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

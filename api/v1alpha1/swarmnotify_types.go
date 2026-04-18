@@ -70,6 +70,7 @@ type WebhookChannelSpec struct {
 	Method string `json:"method,omitempty"`
 	// Headers are additional HTTP headers included in every request.
 	// +optional
+	// +kubebuilder:validation:MaxItems=20
 	Headers []WebhookHeader `json:"headers,omitempty"`
 }
 
@@ -106,8 +107,11 @@ type SwarmNotifySpec struct {
 	// On lists the events that trigger notifications.
 	// If empty, all events fire.
 	// +optional
+	// +kubebuilder:validation:MaxItems=10
 	On []NotifyEvent `json:"on,omitempty"`
 
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=20
 	// Channels lists the notification targets.
 	// +kubebuilder:validation:MinItems=1
 	Channels []NotifyChannelSpec `json:"channels"`
@@ -139,8 +143,7 @@ type NotifyDispatchResult struct {
 
 // SwarmNotifyStatus defines the observed state of SwarmNotify.
 type SwarmNotifyStatus struct {
-	// ChannelCount is the number of configured notification channels.
-	ChannelCount int `json:"channelCount,omitempty"`
+	// +listType=atomic
 	// LastDispatches records the most recent dispatch result per channel index.
 	// +optional
 	LastDispatches []NotifyDispatchResult `json:"lastDispatches,omitempty"`
@@ -155,7 +158,6 @@ type SwarmNotifyStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Channels",type=integer,JSONPath=`.status.channelCount`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:resource:scope=Namespaced,shortName={swnfy,swnfys},categories=kubeswarm
 

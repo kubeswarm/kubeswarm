@@ -31,6 +31,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	kubeswarmv1alpha1 "github.com/kubeswarm/kubeswarm/api/v1alpha1"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/queue"
 )
 
@@ -38,10 +39,6 @@ const (
 	// maxSSESessions caps the number of concurrent MCP SSE sessions to bound
 	// goroutine and memory usage. HTTP 503 is returned when the cap is reached.
 	maxSSESessions = 50
-
-	// annotationTeamQueueURL matches the constant in swarmagent_controller.go.
-	// It carries the role-specific Redis stream URL for team-managed agents.
-	annotationTeamQueueURL = "kubeswarm/team-queue-url"
 )
 
 // Gateway is the MCP SSE gateway. It implements http.Handler.
@@ -148,7 +145,7 @@ func parsePath(path string) (ns, agentName, endpoint string, ok bool) {
 // Prefers the role-specific URL from the team-queue-url annotation (set on team-managed
 // agents by SwarmTeamReconciler); falls back to the operator's default TASK_QUEUE_URL.
 func (g *Gateway) agentQueueURL(annotations map[string]string) string {
-	if url, ok := annotations[annotationTeamQueueURL]; ok && url != "" {
+	if url, ok := annotations[kubeswarmv1alpha1.AnnotationTeamQueueURL]; ok && url != "" {
 		return url
 	}
 	return g.taskQueueURL

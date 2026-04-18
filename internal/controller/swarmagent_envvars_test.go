@@ -18,9 +18,7 @@ package controller
 
 import (
 	"encoding/json"
-
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,17 +39,17 @@ func envVal(envs []corev1.EnvVar, name string) (string, bool) {
 // buildTestEnvVars calls the production buildEnvVars with minimal dependencies.
 func buildTestEnvVars(agent *kubeswarmv1alpha1.SwarmAgent, mcpServers []kubeswarmv1alpha1.MCPToolSpec) []corev1.EnvVar {
 	r := &SwarmAgentReconciler{AgentImage: "test:latest"}
-	return r.buildEnvVars(agent, nil, nil, nil, mcpServers)
+	return r.buildEnvVars(agent, nil, nil, nil, mcpServers, nil, nil)
 }
 
-var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", func() {
+func TestSwarmAgentControllerEnvVarMapping(t *testing.T) {
 
 	// -------------------------------------------------------------------------
 	// Guardrails limits -> env vars
 	// -------------------------------------------------------------------------
 
-	Context("guardrails.limits env var mapping", func() {
-		It("should set default limits when guardrails is nil", func() {
+	t.Run("guardrails.limits env var mapping", func(t *testing.T) {
+		t.Run("should set default limits when guardrails is nil", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -62,23 +60,23 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			envs := buildTestEnvVars(agent, nil)
 
 			v, ok := envVal(envs, "AGENT_MAX_TOKENS")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("8000"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "8000")
 
 			v, ok = envVal(envs, "AGENT_TIMEOUT_SECONDS")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("120"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "120")
 
 			v, ok = envVal(envs, "AGENT_MAX_RETRIES")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("3"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "3")
 
 			v, ok = envVal(envs, "AGENT_DAILY_TOKEN_LIMIT")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("0"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "0")
 		})
 
-		It("should propagate custom guardrails limits to env vars", func() {
+		t.Run("should propagate custom guardrails limits to env vars", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -97,16 +95,16 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			envs := buildTestEnvVars(agent, nil)
 
 			v, _ := envVal(envs, "AGENT_MAX_TOKENS")
-			Expect(v).To(Equal("4000"))
+			requireEqual(t, v, "4000")
 			v, _ = envVal(envs, "AGENT_TIMEOUT_SECONDS")
-			Expect(v).To(Equal("60"))
+			requireEqual(t, v, "60")
 			v, _ = envVal(envs, "AGENT_MAX_RETRIES")
-			Expect(v).To(Equal("5"))
+			requireEqual(t, v, "5")
 			v, _ = envVal(envs, "AGENT_DAILY_TOKEN_LIMIT")
-			Expect(v).To(Equal("500000"))
+			requireEqual(t, v, "500000")
 		})
 
-		It("should use defaults when limits struct is present but fields are zero", func() {
+		t.Run("should use defaults when limits struct is present but fields are zero", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -120,11 +118,11 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			envs := buildTestEnvVars(agent, nil)
 
 			v, _ := envVal(envs, "AGENT_MAX_TOKENS")
-			Expect(v).To(Equal("8000"), "zero tokensPerCall should keep default")
+			requireEqual(t, v, "8000", "zero tokensPerCall should keep default")
 			v, _ = envVal(envs, "AGENT_TIMEOUT_SECONDS")
-			Expect(v).To(Equal("120"), "zero timeoutSeconds should keep default")
+			requireEqual(t, v, "120", "zero timeoutSeconds should keep default")
 			v, _ = envVal(envs, "AGENT_MAX_RETRIES")
-			Expect(v).To(Equal("3"), "zero retries should keep default")
+			requireEqual(t, v, "3", "zero retries should keep default")
 		})
 	})
 
@@ -132,8 +130,8 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 	// Model + name -> env vars
 	// -------------------------------------------------------------------------
 
-	Context("model and identity env vars", func() {
-		It("should set AGENT_MODEL from spec.model", func() {
+	t.Run("model and identity env vars", func(t *testing.T) {
+		t.Run("should set AGENT_MODEL from spec.model", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "my-agent", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -143,11 +141,11 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			}
 			envs := buildTestEnvVars(agent, nil)
 			v, ok := envVal(envs, "AGENT_MODEL")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("gpt-4o"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "gpt-4o")
 		})
 
-		It("should set AGENT_NAME from metadata.name", func() {
+		t.Run("should set AGENT_NAME from metadata.name", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "code-reviewer", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -157,8 +155,8 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			}
 			envs := buildTestEnvVars(agent, nil)
 			v, ok := envVal(envs, "AGENT_NAME")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("code-reviewer"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "code-reviewer")
 		})
 	})
 
@@ -166,8 +164,8 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 	// MCP servers -> AGENT_MCP_SERVERS JSON
 	// -------------------------------------------------------------------------
 
-	Context("MCP server env vars", func() {
-		It("should serialize MCP servers to AGENT_MCP_SERVERS JSON", func() {
+	t.Run("MCP server env vars", func(t *testing.T) {
+		t.Run("should serialize MCP servers to AGENT_MCP_SERVERS JSON", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -180,16 +178,16 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			}
 			envs := buildTestEnvVars(agent, mcpServers)
 			v, ok := envVal(envs, "AGENT_MCP_SERVERS")
-			Expect(ok).To(BeTrue())
+			requireTrue(t, ok)
 
 			var servers []map[string]any
-			Expect(json.Unmarshal([]byte(v), &servers)).To(Succeed())
-			Expect(servers).To(HaveLen(1))
-			Expect(servers[0]["name"]).To(Equal("filesystem"))
-			Expect(servers[0]["url"]).To(Equal("https://mcp.example.com/sse"))
+			requireNoError(t, json.Unmarshal([]byte(v), &servers))
+			requireLen(t, servers, 1)
+			requireEqual(t, servers[0]["name"].(string), "filesystem")
+			requireEqual(t, servers[0]["url"].(string), "https://mcp.example.com/sse")
 		})
 
-		It("should set authType=bearer for MCP servers with bearer auth", func() {
+		t.Run("should set authType=bearer for MCP servers with bearer auth", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -215,9 +213,11 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			v, _ := envVal(envs, "AGENT_MCP_SERVERS")
 
 			var servers []map[string]any
-			Expect(json.Unmarshal([]byte(v), &servers)).To(Succeed())
-			Expect(servers[0]["authType"]).To(Equal("bearer"))
-			Expect(servers[0]["tokenEnvVar"]).NotTo(BeEmpty())
+			requireNoError(t, json.Unmarshal([]byte(v), &servers))
+			requireEqual(t, servers[0]["authType"].(string), "bearer")
+			tokenEnvVar, ok := servers[0]["tokenEnvVar"].(string)
+			requireTrue(t, ok)
+			requireNotEmpty(t, tokenEnvVar)
 		})
 	})
 
@@ -225,8 +225,8 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 	// Webhook tools -> AGENT_WEBHOOK_TOOLS JSON
 	// -------------------------------------------------------------------------
 
-	Context("webhook tool env vars", func() {
-		It("should serialize webhook tools to AGENT_WEBHOOK_TOOLS JSON", func() {
+	t.Run("webhook tool env vars", func(t *testing.T) {
+		t.Run("should serialize webhook tools to AGENT_WEBHOOK_TOOLS JSON", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -241,15 +241,15 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			}
 			envs := buildTestEnvVars(agent, nil)
 			v, ok := envVal(envs, "AGENT_WEBHOOK_TOOLS")
-			Expect(ok).To(BeTrue())
+			requireTrue(t, ok)
 
 			var tools []map[string]any
-			Expect(json.Unmarshal([]byte(v), &tools)).To(Succeed())
-			Expect(tools).To(HaveLen(1))
-			Expect(tools[0]["name"]).To(Equal("notify"))
+			requireNoError(t, json.Unmarshal([]byte(v), &tools))
+			requireLen(t, tools, 1)
+			requireEqual(t, tools[0]["name"].(string), "notify")
 		})
 
-		It("should not set AGENT_WEBHOOK_TOOLS when no webhooks configured", func() {
+		t.Run("should not set AGENT_WEBHOOK_TOOLS when no webhooks configured", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -259,7 +259,7 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			}
 			envs := buildTestEnvVars(agent, nil)
 			_, ok := envVal(envs, "AGENT_WEBHOOK_TOOLS")
-			Expect(ok).To(BeFalse())
+			requireFalse(t, ok)
 		})
 	})
 
@@ -267,8 +267,8 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 	// Semantic health check -> AGENT_VALIDATOR_PROMPT
 	// -------------------------------------------------------------------------
 
-	Context("health check env vars", func() {
-		It("should set AGENT_VALIDATOR_PROMPT for semantic health check", func() {
+	t.Run("health check env vars", func(t *testing.T) {
+		t.Run("should set AGENT_VALIDATOR_PROMPT for semantic health check", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -284,11 +284,11 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			}
 			envs := buildTestEnvVars(agent, nil)
 			v, ok := envVal(envs, "AGENT_VALIDATOR_PROMPT")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("Reply OK if ready."))
+			requireTrue(t, ok)
+			requireEqual(t, v, "Reply OK if ready.")
 		})
 
-		It("should not set AGENT_VALIDATOR_PROMPT for ping health check", func() {
+		t.Run("should not set AGENT_VALIDATOR_PROMPT for ping health check", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -301,7 +301,7 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			}
 			envs := buildTestEnvVars(agent, nil)
 			_, ok := envVal(envs, "AGENT_VALIDATOR_PROMPT")
-			Expect(ok).To(BeFalse())
+			requireFalse(t, ok)
 		})
 	})
 
@@ -309,8 +309,8 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 	// Plugin addresses -> env vars
 	// -------------------------------------------------------------------------
 
-	Context("plugin env vars", func() {
-		It("should set plugin env vars when plugins configured", func() {
+	t.Run("plugin env vars", func(t *testing.T) {
+		t.Run("should set plugin env vars when plugins configured", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -326,15 +326,15 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			}
 			envs := buildTestEnvVars(agent, nil)
 			v, ok := envVal(envs, "SWARM_PLUGIN_LLM_ADDR")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("llm.svc:50051"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "llm.svc:50051")
 
 			v, ok = envVal(envs, "SWARM_PLUGIN_QUEUE_ADDR")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("queue.svc:50052"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "queue.svc:50052")
 		})
 
-		It("should not set plugin env vars when plugins not configured", func() {
+		t.Run("should not set plugin env vars when plugins not configured", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -344,9 +344,9 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			}
 			envs := buildTestEnvVars(agent, nil)
 			_, ok := envVal(envs, "SWARM_PLUGIN_LLM_ADDR")
-			Expect(ok).To(BeFalse())
+			requireFalse(t, ok)
 			_, ok = envVal(envs, "SWARM_PLUGIN_QUEUE_ADDR")
-			Expect(ok).To(BeFalse())
+			requireFalse(t, ok)
 		})
 	})
 
@@ -354,8 +354,8 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 	// Loop policy -> AGENT_LOOP_POLICY JSON
 	// -------------------------------------------------------------------------
 
-	Context("loop policy env vars", func() {
-		It("should serialize loop policy to AGENT_LOOP_POLICY JSON", func() {
+	t.Run("loop policy env vars", func(t *testing.T) {
+		t.Run("should serialize loop policy to AGENT_LOOP_POLICY JSON", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -375,18 +375,18 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			}
 			envs := buildTestEnvVars(agent, nil)
 			v, ok := envVal(envs, "AGENT_LOOP_POLICY")
-			Expect(ok).To(BeTrue())
+			requireTrue(t, ok)
 
 			var lp map[string]any
-			Expect(json.Unmarshal([]byte(v), &lp)).To(Succeed())
-			Expect(lp["dedup"]).To(BeTrue())
+			requireNoError(t, json.Unmarshal([]byte(v), &lp))
+			requireEqual(t, lp["dedup"].(bool), true)
 			comp, ok := lp["compression"].(map[string]any)
-			Expect(ok).To(BeTrue())
-			Expect(comp["thresholdPercent"]).To(BeNumerically("==", 80))
-			Expect(comp["model"]).To(Equal("claude-haiku-4-5-20251001"))
+			requireTrue(t, ok)
+			requireEqual(t, comp["thresholdPercent"].(float64), float64(80))
+			requireEqual(t, comp["model"].(string), "claude-haiku-4-5-20251001")
 		})
 
-		It("should not set AGENT_LOOP_POLICY when loop is nil", func() {
+		t.Run("should not set AGENT_LOOP_POLICY when loop is nil", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -396,19 +396,15 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			}
 			envs := buildTestEnvVars(agent, nil)
 			_, ok := envVal(envs, "AGENT_LOOP_POLICY")
-			Expect(ok).To(BeFalse())
+			requireFalse(t, ok)
 		})
 	})
-
-	// -------------------------------------------------------------------------
-	// Team annotations -> env vars
-	// -------------------------------------------------------------------------
 
 	// -------------------------------------------------------------------------
 	// Reasoning + thinking/answer token caps -> env vars (RFC-0033 phase 4)
 	// -------------------------------------------------------------------------
 
-	Context("buildEnvVars reasoning injection", func() {
+	t.Run("buildEnvVars reasoning injection", func(t *testing.T) {
 		baseAgent := func() *kubeswarmv1alpha1.SwarmAgent {
 			return &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
@@ -420,7 +416,7 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 		}
 		i32 := func(v int32) *int32 { return &v }
 
-		It("injects all five vars when spec.reasoning and guardrails.limits are fully set", func() {
+		t.Run("injects all five vars when spec.reasoning and guardrails.limits are fully set", func(t *testing.T) {
 			agent := baseAgent()
 			agent.Spec.Reasoning = &kubeswarmv1alpha1.ReasoningConfig{
 				Mode:         kubeswarmv1alpha1.ReasoningExplicit,
@@ -436,27 +432,27 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			envs := buildTestEnvVars(agent, nil)
 
 			v, ok := envVal(envs, "AGENT_REASONING_MODE")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("Explicit"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "Explicit")
 
 			v, ok = envVal(envs, "AGENT_REASONING_EFFORT")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("High"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "High")
 
 			v, ok = envVal(envs, "AGENT_REASONING_BUDGET_TOKENS")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("2048"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "2048")
 
 			v, ok = envVal(envs, "AGENT_MAX_THINKING_TOKENS_PER_CALL")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("4096"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "4096")
 
 			v, ok = envVal(envs, "AGENT_MAX_ANSWER_TOKENS_PER_CALL")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("8192"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "8192")
 		})
 
-		It("injects AGENT_REASONING_MODE only when mode is the only field set", func() {
+		t.Run("injects AGENT_REASONING_MODE only when mode is the only field set", func(t *testing.T) {
 			agent := baseAgent()
 			agent.Spec.Reasoning = &kubeswarmv1alpha1.ReasoningConfig{
 				Mode: kubeswarmv1alpha1.ReasoningAuto,
@@ -464,20 +460,20 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			envs := buildTestEnvVars(agent, nil)
 
 			v, ok := envVal(envs, "AGENT_REASONING_MODE")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("Auto"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "Auto")
 
 			_, ok = envVal(envs, "AGENT_REASONING_EFFORT")
-			Expect(ok).To(BeFalse())
+			requireFalse(t, ok)
 			_, ok = envVal(envs, "AGENT_REASONING_BUDGET_TOKENS")
-			Expect(ok).To(BeFalse())
+			requireFalse(t, ok)
 			_, ok = envVal(envs, "AGENT_MAX_THINKING_TOKENS_PER_CALL")
-			Expect(ok).To(BeFalse())
+			requireFalse(t, ok)
 			_, ok = envVal(envs, "AGENT_MAX_ANSWER_TOKENS_PER_CALL")
-			Expect(ok).To(BeFalse())
+			requireFalse(t, ok)
 		})
 
-		It("omits all reasoning env vars when spec.reasoning is nil and guardrails limits fields are nil", func() {
+		t.Run("omits all reasoning env vars when spec.reasoning is nil and guardrails limits fields are nil", func(t *testing.T) {
 			agent := baseAgent()
 			envs := buildTestEnvVars(agent, nil)
 
@@ -489,11 +485,11 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 				"AGENT_MAX_ANSWER_TOKENS_PER_CALL",
 			} {
 				_, ok := envVal(envs, name)
-				Expect(ok).To(BeFalse(), "expected %s to be absent", name)
+				requireFalse(t, ok, "expected "+name+" to be absent")
 			}
 		})
 
-		It("injects AGENT_MAX_THINKING_TOKENS_PER_CALL when set even if spec.reasoning is nil", func() {
+		t.Run("injects AGENT_MAX_THINKING_TOKENS_PER_CALL when set even if spec.reasoning is nil", func(t *testing.T) {
 			agent := baseAgent()
 			agent.Spec.Guardrails = &kubeswarmv1alpha1.AgentGuardrails{
 				Limits: &kubeswarmv1alpha1.GuardrailLimits{
@@ -503,18 +499,18 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			envs := buildTestEnvVars(agent, nil)
 
 			v, ok := envVal(envs, "AGENT_MAX_THINKING_TOKENS_PER_CALL")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("1024"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "1024")
 
 			_, ok = envVal(envs, "AGENT_REASONING_MODE")
-			Expect(ok).To(BeFalse())
+			requireFalse(t, ok)
 			_, ok = envVal(envs, "AGENT_REASONING_EFFORT")
-			Expect(ok).To(BeFalse())
+			requireFalse(t, ok)
 			_, ok = envVal(envs, "AGENT_REASONING_BUDGET_TOKENS")
-			Expect(ok).To(BeFalse())
+			requireFalse(t, ok)
 		})
 
-		It("handles BudgetTokens nil pointer without panic", func() {
+		t.Run("handles BudgetTokens nil pointer without panic", func(t *testing.T) {
 			agent := baseAgent()
 			agent.Spec.Reasoning = &kubeswarmv1alpha1.ReasoningConfig{
 				Mode:         kubeswarmv1alpha1.ReasoningExplicit,
@@ -522,30 +518,30 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 				BudgetTokens: nil,
 			}
 			var envs []corev1.EnvVar
-			Expect(func() { envs = buildTestEnvVars(agent, nil) }).NotTo(Panic())
+			requireNoPanic(t, func() { envs = buildTestEnvVars(agent, nil) })
 
 			_, ok := envVal(envs, "AGENT_REASONING_BUDGET_TOKENS")
-			Expect(ok).To(BeFalse())
+			requireFalse(t, ok)
 
 			v, ok := envVal(envs, "AGENT_REASONING_MODE")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("Explicit"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "Explicit")
 		})
 	})
 
-	Context("team env vars from annotations", func() {
-		It("should set team env vars from annotations and labels", func() {
+	t.Run("team env vars from annotations", func(t *testing.T) {
+		t.Run("should set team env vars from annotations and labels", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test",
 					Namespace: "default",
 					Annotations: map[string]string{
-						annotationTeamQueueURL: "redis://redis:6379/team-queue",
-						annotationTeamRoutes:   `{"reviewer":"redis://redis:6379/reviewer"}`,
-						annotationTeamRole:     "coordinator",
+						kubeswarmv1alpha1.AnnotationTeamQueueURL: "redis://redis:6379/team-queue",
+						kubeswarmv1alpha1.AnnotationTeamRoutes:   `{"reviewer":"redis://redis:6379/reviewer"}`,
+						kubeswarmv1alpha1.AnnotationTeamRole:     "coordinator",
 					},
 					Labels: map[string]string{
-						"kubeswarm/team": "my-team",
+						kubeswarmv1alpha1.LabelTeam: "my-team",
 					},
 				},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -556,20 +552,20 @@ var _ = Describe("SwarmAgent Controller - env var mapping (pure functions)", fun
 			envs := buildTestEnvVars(agent, nil)
 
 			v, ok := envVal(envs, "TASK_QUEUE_URL")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("redis://redis:6379/team-queue"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "redis://redis:6379/team-queue")
 
 			v, ok = envVal(envs, "AGENT_TEAM_ROUTES")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(ContainSubstring("reviewer"))
+			requireTrue(t, ok)
+			requireContains(t, v, "reviewer")
 
 			v, ok = envVal(envs, "AGENT_TEAM_ROLE")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("coordinator"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "coordinator")
 
 			v, ok = envVal(envs, "AGENT_TEAM_NAME")
-			Expect(ok).To(BeTrue())
-			Expect(v).To(Equal("my-team"))
+			requireTrue(t, ok)
+			requireEqual(t, v, "my-team")
 		})
 	})
-})
+}

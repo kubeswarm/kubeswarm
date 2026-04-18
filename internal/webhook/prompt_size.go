@@ -32,9 +32,7 @@ import (
 
 const (
 	// promptWarnBytes is the per-role inline prompt size at which a warning is issued.
-	// Prompts this size can still be applied but the operator will surface a Warning
-	// condition. Users should migrate to systemPromptRef.
-	promptWarnBytes = 50 * 1024 // 50 KB
+	promptWarnBytes = kubeswarmv1alpha1.PromptWarnBytes
 
 	// promptDenyBytes is the per-role inline prompt size at which the request is denied.
 	// A single prompt this large consumes > 1/3 of etcd's default 1.5 MB object budget.
@@ -196,6 +194,18 @@ func (v *SwarmAgentPromptValidator) Handle(ctx context.Context, req admission.Re
 			}
 		}
 	}
+
+	// RFC-0048: validate advisor connections (self-ref, depth, tool name collisions).
+	if advisorErrs := ValidateAdvisorConnections(ctx, v.client, agent); len(advisorErrs) > 0 {
+		return admission.Denied(advisorErrs[0].Error())
+	}
+
+	// RFC-0052: validate gateway configuration.
+	gwErrs, gwWarnings := ValidateGatewayConfig(ctx, v.client, agent)
+	if len(gwErrs) > 0 {
+		return admission.Denied(gwErrs[0].Error())
+	}
+	warnings = append(warnings, gwWarnings...)
 
 	// MCP security policy enforcement (RFC-0016 Phase 5).
 	// Load all SwarmSettings in the namespace and apply the strictest policy found.

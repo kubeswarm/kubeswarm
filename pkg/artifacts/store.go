@@ -31,38 +31,31 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	kubeswarmv1alpha1 "github.com/kubeswarm/kubeswarm/api/v1alpha1"
+	"github.com/kubeswarm/kubeswarm/pkg/registry"
 )
 
 // StoreFactory creates a Store from a connection URL.
 type StoreFactory func(url string) (Store, error)
 
-var (
-	mu            sync.RWMutex
-	storeRegistry = map[string]StoreFactory{}
-)
+var storeReg registry.Registry[StoreFactory]
 
 func init() {
 	// Register the built-in file:// backend.
-	storeRegistry["file"] = func(url string) (Store, error) {
+	storeReg.Register("file", func(url string) (Store, error) {
 		// Strip scheme: "file:///path" → "/path", "file://path" → "path"
 		path := strings.TrimPrefix(url, "file://")
 		if path == "" {
 			path = "/tmp/swarm-artifacts"
 		}
 		return NewLocalStore(path), nil
-	}
+	})
 }
 
 // RegisterStore registers a factory for the given URL scheme.
 // Call from an init() function in each backend package.
-func RegisterStore(scheme string, factory StoreFactory) {
-	mu.Lock()
-	defer mu.Unlock()
-	storeRegistry[scheme] = factory
-}
+func RegisterStore(scheme string, factory StoreFactory) { storeReg.Register(scheme, factory) }
 
 // NewFromURL creates a Store from a connection URL.
 // The built-in "file://" scheme is always available.
@@ -71,21 +64,18 @@ func RegisterStore(scheme string, factory StoreFactory) {
 // Example URLs:
 //
 //	file:///data/artifacts
-//	s3://bucket-name/prefix?region=us-east-1
-//	gcs://bucket-name/prefix
+//	s3://bucket-name/prefix?region=us-east-1&endpoint=http://minio:9000
 func NewFromURL(url string) (Store, error) {
-	scheme := schemeOf(url)
-	mu.RLock()
-	factory, ok := storeRegistry[scheme]
-	mu.RUnlock()
+	scheme := SchemeOf(url)
+	factory, ok := storeReg.Lookup(scheme)
 	if !ok {
 		return nil, fmt.Errorf("no artifact Store registered for scheme %q (url: %s); import the backend package to register it", scheme, url)
 	}
 	return factory(url)
 }
 
-// schemeOf returns the URL scheme (the part before "://").
-func schemeOf(url string) string {
+// SchemeOf returns the URL scheme (the part before "://").
+func SchemeOf(url string) string {
 	if before, _, ok := strings.Cut(url, "://"); ok {
 		return before
 	}
@@ -154,6 +144,7 @@ func (s *LocalStore) Get(_ context.Context, path string) ([]byte, error) {
 func (s *LocalStore) Close() error { return nil }
 
 // FromSpec builds a Store from an ArtifactStoreSpec. Returns NoopStore when spec is nil.
+// The S3 backend requires the runtime package to be imported (runtime/pkg/artifacts/s3).
 func FromSpec(spec *kubeswarmv1alpha1.ArtifactStoreSpec) (Store, error) {
 	if spec == nil {
 		return &NoopStore{}, nil
@@ -166,10 +157,28 @@ func FromSpec(spec *kubeswarmv1alpha1.ArtifactStoreSpec) (Store, error) {
 		}
 		return NewLocalStore(path), nil
 	case kubeswarmv1alpha1.ArtifactStoreS3:
-		return nil, fmt.Errorf("artifacts: S3 store is not yet implemented (planned v0.16.0)")
-	case kubeswarmv1alpha1.ArtifactStoreGCS:
-		return nil, fmt.Errorf("artifacts: GCS store is not yet implemented (planned v0.16.0)")
+		if spec.S3 == nil {
+			return nil, fmt.Errorf("artifacts: s3 config is required when type is s3")
+		}
+		return NewFromURL(s3URL(spec.S3))
 	default:
 		return nil, fmt.Errorf("artifacts: unknown store type %q", spec.Type)
 	}
+}
+
+// s3URL builds an s3:// connection URL from an ArtifactStoreS3Spec.
+func s3URL(s *kubeswarmv1alpha1.ArtifactStoreS3Spec) string {
+	u := "s3://" + s.Bucket
+	if s.Prefix != "" {
+		u += "/" + strings.TrimPrefix(s.Prefix, "/")
+	}
+	sep := "?"
+	if s.Region != "" {
+		u += sep + "region=" + s.Region
+		sep = "&"
+	}
+	if s.Endpoint != "" {
+		u += sep + "endpoint=" + s.Endpoint
+	}
+	return u
 }

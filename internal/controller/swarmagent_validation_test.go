@@ -18,9 +18,7 @@ package controller
 
 import (
 	"fmt"
-
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,7 +27,7 @@ import (
 	kubeswarmv1alpha1 "github.com/kubeswarm/kubeswarm/api/v1alpha1"
 )
 
-var _ = Describe("SwarmAgent CRD validation", func() {
+func TestSwarmAgentCRDValidation(t *testing.T) {
 	const namespace = "default"
 	var nameIdx int
 
@@ -48,29 +46,36 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 		}
 	}
 
-	AfterEach(func() {
-		// Best-effort cleanup of any agents created during test.
-		list := &kubeswarmv1alpha1.SwarmAgentList{}
-		if err := k8sClient.List(ctx, list); err == nil {
-			for i := range list.Items {
-				_ = k8sClient.Delete(ctx, &list.Items[i])
+	cleanup := func(t *testing.T) {
+		t.Helper()
+		t.Cleanup(func() {
+			// Best-effort cleanup of any agents created during test.
+			list := &kubeswarmv1alpha1.SwarmAgentList{}
+			if err := k8sClient.List(ctx, list); err == nil {
+				for i := range list.Items {
+					_ = k8sClient.Delete(ctx, &list.Items[i])
+				}
 			}
-		}
-	})
+		})
+	}
 
 	// -------------------------------------------------------------------------
 	// Happy path
 	// -------------------------------------------------------------------------
 
-	Context("valid minimal spec", func() {
-		It("should accept a SwarmAgent with model + inline prompt", func() {
+	t.Run("valid minimal spec", func(t *testing.T) {
+		cleanup(t)
+
+		t.Run("should accept a SwarmAgent with model + inline prompt", func(t *testing.T) {
 			agent := validAgent(uniqueName("valid-minimal"))
-			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, agent))
 		})
 	})
 
-	Context("valid full spec", func() {
-		It("should accept a SwarmAgent with all sections populated", func() {
+	t.Run("valid full spec", func(t *testing.T) {
+		cleanup(t)
+
+		t.Run("should accept a SwarmAgent with all sections populated", func(t *testing.T) {
 			replicas := int32(2)
 			agent := validAgent(uniqueName("valid-full"))
 			agent.Spec.Runtime = kubeswarmv1alpha1.AgentRuntime{
@@ -89,8 +94,7 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 					Allow: []string{"filesystem/*"},
 					Deny:  []string{"shell/exec"},
 					Trust: &kubeswarmv1alpha1.ToolTrustPolicy{
-						Default:                "external",
-						EnforceInputValidation: true,
+						Default: "external",
 					},
 				},
 			}
@@ -113,9 +117,8 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 			}
 			agent.Spec.Observability = &kubeswarmv1alpha1.AgentObservability{
 				Logging: &kubeswarmv1alpha1.AgentLogging{Level: kubeswarmv1alpha1.LogLevelInfo, ToolCalls: true},
-				Metrics: &kubeswarmv1alpha1.AgentMetrics{Enabled: true},
 			}
-			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, agent))
 		})
 	})
 
@@ -123,8 +126,10 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 	// Enum validation
 	// -------------------------------------------------------------------------
 
-	Context("trust level enum", func() {
-		It("should accept valid trust levels", func() {
+	t.Run("trust level enum", func(t *testing.T) {
+		cleanup(t)
+
+		t.Run("should accept valid trust levels", func(t *testing.T) {
 			for _, trust := range []kubeswarmv1alpha1.ToolTrustLevel{"internal", "external", "sandbox"} {
 				agent := validAgent(uniqueName("trust"))
 				agent.Spec.Tools = &kubeswarmv1alpha1.AgentTools{
@@ -132,11 +137,11 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 						{Name: "srv", URL: "https://example.com/sse", Trust: trust},
 					},
 				}
-				Expect(k8sClient.Create(ctx, agent)).To(Succeed(), "trust=%s", trust)
+				requireNoError(t, k8sClient.Create(ctx, agent))
 			}
 		})
 
-		It("should reject invalid trust level", func() {
+		t.Run("should reject invalid trust level", func(t *testing.T) {
 			agent := validAgent(uniqueName("bad-trust"))
 			agent.Spec.Tools = &kubeswarmv1alpha1.AgentTools{
 				MCP: []kubeswarmv1alpha1.MCPToolSpec{
@@ -144,77 +149,85 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 				},
 			}
 			err := k8sClient.Create(ctx, agent)
-			Expect(err).To(HaveOccurred())
+			requireError(t, err)
 		})
 	})
 
-	Context("networkPolicy enum", func() {
-		It("should accept valid values", func() {
+	t.Run("networkPolicy enum", func(t *testing.T) {
+		cleanup(t)
+
+		t.Run("should accept valid values", func(t *testing.T) {
 			for _, np := range []kubeswarmv1alpha1.NetworkPolicyMode{"default", "strict", "disabled"} {
 				agent := validAgent(uniqueName("np"))
 				if agent.Spec.Infrastructure == nil {
 					agent.Spec.Infrastructure = &kubeswarmv1alpha1.AgentInfrastructure{}
 				}
 				agent.Spec.Infrastructure.NetworkPolicy = np
-				Expect(k8sClient.Create(ctx, agent)).To(Succeed(), "networkPolicy=%s", np)
+				requireNoError(t, k8sClient.Create(ctx, agent))
 			}
 		})
 
-		It("should reject invalid networkPolicy", func() {
+		t.Run("should reject invalid networkPolicy", func(t *testing.T) {
 			agent := validAgent(uniqueName("bad-np"))
 			if agent.Spec.Infrastructure == nil {
 				agent.Spec.Infrastructure = &kubeswarmv1alpha1.AgentInfrastructure{}
 			}
 			agent.Spec.Infrastructure.NetworkPolicy = "open"
 			err := k8sClient.Create(ctx, agent)
-			Expect(err).To(HaveOccurred())
+			requireError(t, err)
 		})
 	})
 
-	Context("healthCheck type enum", func() {
-		It("should accept semantic and ping", func() {
+	t.Run("healthCheck type enum", func(t *testing.T) {
+		cleanup(t)
+
+		t.Run("should accept semantic and ping", func(t *testing.T) {
 			for _, hcType := range []kubeswarmv1alpha1.HealthCheckType{kubeswarmv1alpha1.HealthCheckSemantic, kubeswarmv1alpha1.HealthCheckPing} {
 				agent := validAgent(uniqueName("hc"))
 				agent.Spec.Observability = &kubeswarmv1alpha1.AgentObservability{
 					HealthCheck: &kubeswarmv1alpha1.AgentHealthCheck{Type: hcType},
 				}
-				Expect(k8sClient.Create(ctx, agent)).To(Succeed(), "type=%s", hcType)
+				requireNoError(t, k8sClient.Create(ctx, agent))
 			}
 		})
 
-		It("should reject invalid healthCheck type", func() {
+		t.Run("should reject invalid healthCheck type", func(t *testing.T) {
 			agent := validAgent(uniqueName("bad-hc"))
 			agent.Spec.Observability = &kubeswarmv1alpha1.AgentObservability{
 				HealthCheck: &kubeswarmv1alpha1.AgentHealthCheck{Type: kubeswarmv1alpha1.HealthCheckType("tcp")},
 			}
 			err := k8sClient.Create(ctx, agent)
-			Expect(err).To(HaveOccurred())
+			requireError(t, err)
 		})
 	})
 
-	Context("logging level enum", func() {
-		It("should accept valid levels", func() {
+	t.Run("logging level enum", func(t *testing.T) {
+		cleanup(t)
+
+		t.Run("should accept valid levels", func(t *testing.T) {
 			for _, level := range []kubeswarmv1alpha1.LogLevel{kubeswarmv1alpha1.LogLevelDebug, kubeswarmv1alpha1.LogLevelInfo, kubeswarmv1alpha1.LogLevelWarn, kubeswarmv1alpha1.LogLevelError} {
 				agent := validAgent(uniqueName("log"))
 				agent.Spec.Observability = &kubeswarmv1alpha1.AgentObservability{
 					Logging: &kubeswarmv1alpha1.AgentLogging{Level: level},
 				}
-				Expect(k8sClient.Create(ctx, agent)).To(Succeed(), "level=%s", level)
+				requireNoError(t, k8sClient.Create(ctx, agent))
 			}
 		})
 
-		It("should reject invalid logging level", func() {
+		t.Run("should reject invalid logging level", func(t *testing.T) {
 			agent := validAgent(uniqueName("bad-log"))
 			agent.Spec.Observability = &kubeswarmv1alpha1.AgentObservability{
 				Logging: &kubeswarmv1alpha1.AgentLogging{Level: kubeswarmv1alpha1.LogLevel("trace")},
 			}
 			err := k8sClient.Create(ctx, agent)
-			Expect(err).To(HaveOccurred())
+			requireError(t, err)
 		})
 	})
 
-	Context("webhook method enum", func() {
-		It("should accept valid methods", func() {
+	t.Run("webhook method enum", func(t *testing.T) {
+		cleanup(t)
+
+		t.Run("should accept valid methods", func(t *testing.T) {
 			for _, method := range []string{"GET", "POST", "PUT", "PATCH"} {
 				agent := validAgent(uniqueName("wh"))
 				agent.Spec.Tools = &kubeswarmv1alpha1.AgentTools{
@@ -222,11 +235,11 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 						{Name: "hook", URL: "https://example.com/hook", Method: method},
 					},
 				}
-				Expect(k8sClient.Create(ctx, agent)).To(Succeed(), "method=%s", method)
+				requireNoError(t, k8sClient.Create(ctx, agent))
 			}
 		})
 
-		It("should reject invalid webhook method", func() {
+		t.Run("should reject invalid webhook method", func(t *testing.T) {
 			agent := validAgent(uniqueName("bad-wh"))
 			agent.Spec.Tools = &kubeswarmv1alpha1.AgentTools{
 				Webhooks: []kubeswarmv1alpha1.WebhookToolSpec{
@@ -234,7 +247,7 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 				},
 			}
 			err := k8sClient.Create(ctx, agent)
-			Expect(err).To(HaveOccurred())
+			requireError(t, err)
 		})
 	})
 
@@ -242,39 +255,43 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 	// Numeric range validation
 	// -------------------------------------------------------------------------
 
-	Context("replicas range", func() {
-		It("should reject replicas above 50", func() {
+	t.Run("replicas range", func(t *testing.T) {
+		cleanup(t)
+
+		t.Run("should reject replicas above 50", func(t *testing.T) {
 			over := int32(51)
 			agent := validAgent(uniqueName("rep-high"))
 			agent.Spec.Runtime = kubeswarmv1alpha1.AgentRuntime{Replicas: &over}
 			err := k8sClient.Create(ctx, agent)
-			Expect(err).To(HaveOccurred())
+			requireError(t, err)
 		})
 
-		It("should accept replicas at 0", func() {
+		t.Run("should accept replicas at 0", func(t *testing.T) {
 			zero := int32(0)
 			agent := validAgent(uniqueName("rep-zero"))
 			agent.Spec.Runtime = kubeswarmv1alpha1.AgentRuntime{Replicas: &zero}
-			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, agent))
 		})
 	})
 
-	Context("retries range", func() {
-		It("should reject retries above 100", func() {
+	t.Run("retries range", func(t *testing.T) {
+		cleanup(t)
+
+		t.Run("should reject retries above 100", func(t *testing.T) {
 			agent := validAgent(uniqueName("ret-high"))
 			agent.Spec.Guardrails = &kubeswarmv1alpha1.AgentGuardrails{
 				Limits: &kubeswarmv1alpha1.GuardrailLimits{Retries: 101},
 			}
 			err := k8sClient.Create(ctx, agent)
-			Expect(err).To(HaveOccurred())
+			requireError(t, err)
 		})
 
-		It("should accept retries at 0", func() {
+		t.Run("should accept retries at 0", func(t *testing.T) {
 			agent := validAgent(uniqueName("ret-zero"))
 			agent.Spec.Guardrails = &kubeswarmv1alpha1.AgentGuardrails{
 				Limits: &kubeswarmv1alpha1.GuardrailLimits{Retries: 0},
 			}
-			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, agent))
 		})
 	})
 
@@ -282,28 +299,30 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 	// CEL mutual exclusivity rules
 	// -------------------------------------------------------------------------
 
-	Context("MCPToolSpec url/capabilityRef mutual exclusivity", func() {
-		It("should accept url only", func() {
+	t.Run("MCPToolSpec url/capabilityRef mutual exclusivity", func(t *testing.T) {
+		cleanup(t)
+
+		t.Run("should accept url only", func(t *testing.T) {
 			agent := validAgent(uniqueName("mcp-url"))
 			agent.Spec.Tools = &kubeswarmv1alpha1.AgentTools{
 				MCP: []kubeswarmv1alpha1.MCPToolSpec{
 					{Name: "srv", URL: "https://example.com/sse"},
 				},
 			}
-			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, agent))
 		})
 
-		It("should accept capabilityRef only", func() {
+		t.Run("should accept capabilityRef only", func(t *testing.T) {
 			agent := validAgent(uniqueName("mcp-cap"))
 			agent.Spec.Tools = &kubeswarmv1alpha1.AgentTools{
 				MCP: []kubeswarmv1alpha1.MCPToolSpec{
 					{Name: "srv", CapabilityRef: "code-search"},
 				},
 			}
-			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, agent))
 		})
 
-		It("should reject both url and capabilityRef", func() {
+		t.Run("should reject both url and capabilityRef", func(t *testing.T) {
 			agent := validAgent(uniqueName("mcp-both"))
 			agent.Spec.Tools = &kubeswarmv1alpha1.AgentTools{
 				MCP: []kubeswarmv1alpha1.MCPToolSpec{
@@ -311,28 +330,30 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 				},
 			}
 			err := k8sClient.Create(ctx, agent)
-			Expect(err).To(HaveOccurred())
+			requireError(t, err)
 		})
 	})
 
-	Context("AgentConnection agentRef/capabilityRef mutual exclusivity", func() {
-		It("should accept agentRef only", func() {
+	t.Run("AgentConnection agentRef/capabilityRef mutual exclusivity", func(t *testing.T) {
+		cleanup(t)
+
+		t.Run("should accept agentRef only", func(t *testing.T) {
 			agent := validAgent(uniqueName("conn-agent"))
 			agent.Spec.Agents = []kubeswarmv1alpha1.AgentConnection{
 				{Name: "helper", AgentRef: &corev1.LocalObjectReference{Name: "other-agent"}},
 			}
-			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, agent))
 		})
 
-		It("should accept capabilityRef only", func() {
+		t.Run("should accept capabilityRef only", func(t *testing.T) {
 			agent := validAgent(uniqueName("conn-cap"))
 			agent.Spec.Agents = []kubeswarmv1alpha1.AgentConnection{
 				{Name: "helper", CapabilityRef: &corev1.LocalObjectReference{Name: "search"}},
 			}
-			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, agent))
 		})
 
-		It("should reject both agentRef and capabilityRef", func() {
+		t.Run("should reject both agentRef and capabilityRef", func(t *testing.T) {
 			agent := validAgent(uniqueName("conn-both"))
 			agent.Spec.Agents = []kubeswarmv1alpha1.AgentConnection{
 				{
@@ -342,21 +363,23 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 				},
 			}
 			err := k8sClient.Create(ctx, agent)
-			Expect(err).To(HaveOccurred())
+			requireError(t, err)
 		})
 
-		It("should reject neither agentRef nor capabilityRef", func() {
+		t.Run("should reject neither agentRef nor capabilityRef", func(t *testing.T) {
 			agent := validAgent(uniqueName("conn-none"))
 			agent.Spec.Agents = []kubeswarmv1alpha1.AgentConnection{
 				{Name: "helper"},
 			}
 			err := k8sClient.Create(ctx, agent)
-			Expect(err).To(HaveOccurred())
+			requireError(t, err)
 		})
 	})
 
-	Context("MCPServerAuth bearer/mtls mutual exclusivity", func() {
-		It("should accept bearer only", func() {
+	t.Run("MCPServerAuth bearer/mtls mutual exclusivity", func(t *testing.T) {
+		cleanup(t)
+
+		t.Run("should accept bearer only", func(t *testing.T) {
 			agent := validAgent(uniqueName("auth-bearer"))
 			agent.Spec.Tools = &kubeswarmv1alpha1.AgentTools{
 				MCP: []kubeswarmv1alpha1.MCPToolSpec{
@@ -373,10 +396,10 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, agent))
 		})
 
-		It("should reject both bearer and mtls", func() {
+		t.Run("should reject both bearer and mtls", func(t *testing.T) {
 			agent := validAgent(uniqueName("auth-both"))
 			agent.Spec.Tools = &kubeswarmv1alpha1.AgentTools{
 				MCP: []kubeswarmv1alpha1.MCPToolSpec{
@@ -397,17 +420,19 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 				},
 			}
 			err := k8sClient.Create(ctx, agent)
-			Expect(err).To(HaveOccurred())
+			requireError(t, err)
 		})
 	})
 
-	Context("AgentPrompt inline/from mutual exclusivity", func() {
-		It("should accept inline only", func() {
+	t.Run("AgentPrompt inline/from mutual exclusivity", func(t *testing.T) {
+		cleanup(t)
+
+		t.Run("should accept inline only", func(t *testing.T) {
 			agent := validAgent(uniqueName("prompt-inline"))
-			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, agent))
 		})
 
-		It("should accept from only", func() {
+		t.Run("should accept from only", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: uniqueName("prompt-from"), Namespace: namespace},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -422,10 +447,10 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			requireNoError(t, k8sClient.Create(ctx, agent))
 		})
 
-		It("should reject both inline and from", func() {
+		t.Run("should reject both inline and from", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: uniqueName("prompt-both"), Namespace: namespace},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -442,12 +467,14 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 				},
 			}
 			err := k8sClient.Create(ctx, agent)
-			Expect(err).To(HaveOccurred())
+			requireError(t, err)
 		})
 	})
 
-	Context("SystemPromptSource configMapKeyRef/secretKeyRef mutual exclusivity", func() {
-		It("should reject both configMapKeyRef and secretKeyRef", func() {
+	t.Run("SystemPromptSource configMapKeyRef/secretKeyRef mutual exclusivity", func(t *testing.T) {
+		cleanup(t)
+
+		t.Run("should reject both configMapKeyRef and secretKeyRef", func(t *testing.T) {
 			agent := &kubeswarmv1alpha1.SwarmAgent{
 				ObjectMeta: metav1.ObjectMeta{Name: uniqueName("src-both"), Namespace: namespace},
 				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
@@ -467,7 +494,7 @@ var _ = Describe("SwarmAgent CRD validation", func() {
 				},
 			}
 			err := k8sClient.Create(ctx, agent)
-			Expect(err).To(HaveOccurred())
+			requireError(t, err)
 		})
 	})
-})
+}

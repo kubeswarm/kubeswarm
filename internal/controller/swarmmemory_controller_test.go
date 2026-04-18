@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -25,65 +26,64 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-
 	kubeswarmv1alpha1 "github.com/kubeswarm/kubeswarm/api/v1alpha1"
 )
 
-var _ = Describe("SwarmMemory Controller", func() {
-	const (
-		namespace = "default"
-	)
+func TestSwarmMemoryController(t *testing.T) {
+	const namespace = "default"
 	ctx := context.Background()
 
 	newReconciler := func() *SwarmMemoryReconciler {
 		return &SwarmMemoryReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 	}
 
-	reconcileAndFetch := func(name string) *kubeswarmv1alpha1.SwarmMemory {
+	reconcileAndFetch := func(t *testing.T, name string) *kubeswarmv1alpha1.SwarmMemory {
+		t.Helper()
 		nn := types.NamespacedName{Name: name, Namespace: namespace}
 		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: nn})
-		Expect(err).NotTo(HaveOccurred())
+		requireNoError(t, err)
 		mem := &kubeswarmv1alpha1.SwarmMemory{}
-		Expect(k8sClient.Get(ctx, nn, mem)).To(Succeed())
+		requireNoError(t, k8sClient.Get(ctx, nn, mem))
 		return mem
 	}
 
-	cleanup := func(name string) {
+	cleanup := func(t *testing.T, name string) {
+		t.Helper()
 		mem := &kubeswarmv1alpha1.SwarmMemory{}
 		nn := types.NamespacedName{Name: name, Namespace: namespace}
 		if err := k8sClient.Get(ctx, nn, mem); err == nil {
-			Expect(k8sClient.Delete(ctx, mem)).To(Succeed())
+			requireNoError(t, k8sClient.Delete(ctx, mem))
 		}
 	}
 
-	Context("in-context backend", func() {
+	t.Run("in-context backend", func(t *testing.T) {
 		const name = "mem-incontext"
-		AfterEach(func() { cleanup(name) })
+		t.Cleanup(func() { cleanup(t, name) })
 
-		It("should set Ready=True with no extra config required", func() {
-			Expect(k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmMemory{
+		t.Run("should set Ready=True with no extra config required", func(t *testing.T) {
+			requireNoError(t, k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmMemory{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 				Spec: kubeswarmv1alpha1.SwarmMemorySpec{
 					Backend: kubeswarmv1alpha1.MemoryBackendInContext,
 				},
-			})).To(Succeed())
+			}))
 
-			mem := reconcileAndFetch(name)
+			mem := reconcileAndFetch(t, name)
 			cond := apimeta.FindStatusCondition(mem.Status.Conditions, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-			Expect(cond.Reason).To(Equal("Accepted"))
+			if cond == nil {
+				t.Fatal("expected Ready condition, got nil")
+			}
+			requireEqual(t, cond.Status, metav1.ConditionTrue)
+			requireEqual(t, cond.Reason, "Accepted")
 		})
 	})
 
-	Context("redis backend", func() {
-		const name = "mem-redis"
-		AfterEach(func() { cleanup(name) })
+	t.Run("redis backend", func(t *testing.T) {
+		t.Run("should set Ready=True when secretRef is provided", func(t *testing.T) {
+			const name = "mem-redis-ok"
+			t.Cleanup(func() { cleanup(t, name) })
 
-		It("should set Ready=True when secretRef is provided", func() {
-			Expect(k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmMemory{
+			requireNoError(t, k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmMemory{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 				Spec: kubeswarmv1alpha1.SwarmMemorySpec{
 					Backend: kubeswarmv1alpha1.MemoryBackendRedis,
@@ -92,33 +92,43 @@ var _ = Describe("SwarmMemory Controller", func() {
 						TTLSeconds: 3600,
 					},
 				},
-			})).To(Succeed())
+			}))
 
-			mem := reconcileAndFetch(name)
+			mem := reconcileAndFetch(t, name)
 			cond := apimeta.FindStatusCondition(mem.Status.Conditions, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			if cond == nil {
+				t.Fatal("expected Ready condition, got nil")
+			}
+			requireEqual(t, cond.Status, metav1.ConditionTrue)
 		})
 
-		It("should set Ready=False when spec.redis is missing", func() {
-			Expect(k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmMemory{
+		t.Run("should set Ready=False when spec.redis is missing", func(t *testing.T) {
+			const name = "mem-redis-nospec"
+			t.Cleanup(func() { cleanup(t, name) })
+
+			requireNoError(t, k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmMemory{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 				Spec: kubeswarmv1alpha1.SwarmMemorySpec{
 					Backend: kubeswarmv1alpha1.MemoryBackendRedis,
 					// Redis field intentionally omitted
 				},
-			})).To(Succeed())
+			}))
 
-			mem := reconcileAndFetch(name)
+			mem := reconcileAndFetch(t, name)
 			cond := apimeta.FindStatusCondition(mem.Status.Conditions, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal("InvalidSpec"))
-			Expect(cond.Message).To(ContainSubstring("spec.redis is required"))
+			if cond == nil {
+				t.Fatal("expected Ready condition, got nil")
+			}
+			requireEqual(t, cond.Status, metav1.ConditionFalse)
+			requireEqual(t, cond.Reason, "InvalidSpec")
+			requireContains(t, cond.Message, "spec.redis is required")
 		})
 
-		It("should set Ready=False when secretRef.name is empty", func() {
-			Expect(k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmMemory{
+		t.Run("should set Ready=False when secretRef.name is empty", func(t *testing.T) {
+			const name = "mem-redis-nosecret"
+			t.Cleanup(func() { cleanup(t, name) })
+
+			requireNoError(t, k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmMemory{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 				Spec: kubeswarmv1alpha1.SwarmMemorySpec{
 					Backend: kubeswarmv1alpha1.MemoryBackendRedis,
@@ -126,22 +136,24 @@ var _ = Describe("SwarmMemory Controller", func() {
 						SecretRef: corev1.LocalObjectReference{Name: ""},
 					},
 				},
-			})).To(Succeed())
+			}))
 
-			mem := reconcileAndFetch(name)
+			mem := reconcileAndFetch(t, name)
 			cond := apimeta.FindStatusCondition(mem.Status.Conditions, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Message).To(ContainSubstring("secretRef.name is required"))
+			if cond == nil {
+				t.Fatal("expected Ready condition, got nil")
+			}
+			requireEqual(t, cond.Status, metav1.ConditionFalse)
+			requireContains(t, cond.Message, "secretRef.name is required")
 		})
 	})
 
-	Context("vector-store backend", func() {
-		const name = "mem-vectorstore"
-		AfterEach(func() { cleanup(name) })
+	t.Run("vector-store backend", func(t *testing.T) {
+		t.Run("should set Ready=True when endpoint is provided", func(t *testing.T) {
+			const name = "mem-vectorstore-ok"
+			t.Cleanup(func() { cleanup(t, name) })
 
-		It("should set Ready=True when endpoint is provided", func() {
-			Expect(k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmMemory{
+			requireNoError(t, k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmMemory{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 				Spec: kubeswarmv1alpha1.SwarmMemorySpec{
 					Backend: kubeswarmv1alpha1.MemoryBackendVectorStore,
@@ -150,33 +162,49 @@ var _ = Describe("SwarmMemory Controller", func() {
 						Endpoint:   "http://qdrant.qdrant.svc.cluster.local:6333",
 						Collection: "agent-memories",
 					},
+					Embedding: &kubeswarmv1alpha1.EmbeddingConfig{
+						Model: "text-embedding-3-small",
+					},
 				},
-			})).To(Succeed())
+			}))
 
-			mem := reconcileAndFetch(name)
+			mem := reconcileAndFetch(t, name)
 			cond := apimeta.FindStatusCondition(mem.Status.Conditions, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			if cond == nil {
+				t.Fatal("expected Ready condition, got nil")
+			}
+			requireEqual(t, cond.Status, metav1.ConditionTrue)
 		})
 
-		It("should set Ready=False when spec.vectorStore is missing", func() {
-			Expect(k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmMemory{
+		t.Run("should set Ready=False when spec.vectorStore is missing", func(t *testing.T) {
+			const name = "mem-vectorstore-nospec"
+			t.Cleanup(func() { cleanup(t, name) })
+
+			requireNoError(t, k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmMemory{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 				Spec: kubeswarmv1alpha1.SwarmMemorySpec{
 					Backend: kubeswarmv1alpha1.MemoryBackendVectorStore,
 					// VectorStore field intentionally omitted
+					Embedding: &kubeswarmv1alpha1.EmbeddingConfig{
+						Model: "text-embedding-3-small",
+					},
 				},
-			})).To(Succeed())
+			}))
 
-			mem := reconcileAndFetch(name)
+			mem := reconcileAndFetch(t, name)
 			cond := apimeta.FindStatusCondition(mem.Status.Conditions, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Message).To(ContainSubstring("spec.vectorStore is required"))
+			if cond == nil {
+				t.Fatal("expected Ready condition, got nil")
+			}
+			requireEqual(t, cond.Status, metav1.ConditionFalse)
+			requireContains(t, cond.Message, "spec.vectorStore is required")
 		})
 
-		It("should set Ready=False when endpoint is empty", func() {
-			Expect(k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmMemory{
+		t.Run("should set Ready=False when endpoint is empty", func(t *testing.T) {
+			const name = "mem-vectorstore-noendpoint"
+			t.Cleanup(func() { cleanup(t, name) })
+
+			requireNoError(t, k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmMemory{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 				Spec: kubeswarmv1alpha1.SwarmMemorySpec{
 					Backend: kubeswarmv1alpha1.MemoryBackendVectorStore,
@@ -184,23 +212,28 @@ var _ = Describe("SwarmMemory Controller", func() {
 						Provider: kubeswarmv1alpha1.VectorStoreProviderQdrant,
 						Endpoint: "", // missing
 					},
+					Embedding: &kubeswarmv1alpha1.EmbeddingConfig{
+						Model: "text-embedding-3-small",
+					},
 				},
-			})).To(Succeed())
+			}))
 
-			mem := reconcileAndFetch(name)
+			mem := reconcileAndFetch(t, name)
 			cond := apimeta.FindStatusCondition(mem.Status.Conditions, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Message).To(ContainSubstring("endpoint is required"))
+			if cond == nil {
+				t.Fatal("expected Ready condition, got nil")
+			}
+			requireEqual(t, cond.Status, metav1.ConditionFalse)
+			requireContains(t, cond.Message, "endpoint is required")
 		})
 	})
 
-	Context("when the SwarmMemory does not exist", func() {
-		It("should return without error", func() {
+	t.Run("when the SwarmMemory does not exist", func(t *testing.T) {
+		t.Run("should return without error", func(t *testing.T) {
 			_, err := newReconciler().Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: "does-not-exist", Namespace: namespace},
 			})
-			Expect(err).NotTo(HaveOccurred())
+			requireNoError(t, err)
 		})
 	})
-})
+}

@@ -16,10 +16,6 @@ limitations under the License.
 
 package audit
 
-// Mode controls the verbosity of audit logging. It is an alias used
-// throughout the audit package for conciseness.
-type Mode = AuditLogMode
-
 // AuditLogMode controls the verbosity of audit logging.
 type AuditLogMode string
 
@@ -113,17 +109,7 @@ func applyConfig(dst *AuditConfig, src *AuditConfig) {
 // MergeRedactionPatterns merges multiple lists of redaction patterns into a
 // single deduplicated list preserving order of first occurrence.
 func MergeRedactionPatterns(patterns ...[]string) []string {
-	seen := make(map[string]struct{})
-	var merged []string
-	for _, list := range patterns {
-		for _, p := range list {
-			if _, ok := seen[p]; !ok {
-				seen[p] = struct{}{}
-				merged = append(merged, p)
-			}
-		}
-	}
-	return merged
+	return mergeStringSlices(patterns...)
 }
 
 // mergeStringSlices merges multiple string slices into a single deduplicated list.

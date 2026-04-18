@@ -159,8 +159,10 @@ spec:
                   x-kubernetes-validations:
                   - message: exactly one of team or agent must be set
                     rule: has(self.team) != has(self.agent)
+                maxItems: 20
                 minItems: 1
                 type: array
+                x-kubernetes-list-type: atomic
             required:
             - source
             - targets

@@ -68,6 +68,7 @@ type SwarmRunSpec struct {
 	// Pipeline is a snapshot of the SwarmTeam pipeline DAG at trigger time.
 	// Empty for routed-mode runs.
 	// +optional
+	// +kubebuilder:validation:MaxItems=100
 	Pipeline []SwarmTeamPipelineStep `json:"pipeline,omitempty"`
 
 	// DefaultContextPolicy is a snapshot of the team's defaultContextPolicy at trigger time.
@@ -78,6 +79,7 @@ type SwarmRunSpec struct {
 	// Roles is a snapshot of the SwarmTeam role definitions at trigger time.
 	// Empty for routed-mode runs.
 	// +optional
+	// +kubebuilder:validation:MaxItems=50
 	Roles []SwarmTeamRole `json:"roles,omitempty"`
 
 	// Output is a Go template expression that selects the final run result.
@@ -112,6 +114,7 @@ type SwarmRunStatus struct {
 	// Steps holds the per-step execution state for this run, including full
 	// step outputs. Unlike SwarmTeam.Status, this is never reset - it is the
 	// permanent record of what happened during this run.
+	// +kubebuilder:validation:MaxItems=100
 	Steps []PipelineStepStatus `json:"steps,omitempty"`
 
 	// Output is the resolved final pipeline output once phase is Succeeded.

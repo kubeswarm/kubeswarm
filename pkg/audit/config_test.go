@@ -77,10 +77,10 @@ func TestResolveConfig_PrecedenceTable(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		cluster   Mode
-		namespace Mode
-		agent     Mode
-		want      Mode
+		cluster   AuditLogMode
+		namespace AuditLogMode
+		agent     AuditLogMode
+		want      AuditLogMode
 	}{
 		{"off/unset/unset", ModeOff, "", "", ModeOff},
 		{"off/actions/unset", ModeOff, ModeActions, "", ModeActions},

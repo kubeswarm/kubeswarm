@@ -60,6 +60,14 @@ spec:
           spec:
             description: SwarmRegistrySpec defines the desired state of SwarmRegistry.
             properties:
+              maxDepth:
+                default: 3
+                description: |-
+                  MaxDepth is the maximum agent-to-agent delegation depth allowed for registry-resolved steps.
+                  Prevents runaway recursion.
+                maximum: 20
+                minimum: 1
+                type: integer
               mcpBindings:
                 description: |-
                   MCPBindings maps capability IDs to MCP server URLs for this deployment.
@@ -87,25 +95,8 @@ spec:
                   - capabilityId
                   - url
                   type: object
+                maxItems: 50
                 type: array
-              policy:
-                description: Policy controls delegation safety.
-                properties:
-                  allowCrossTeam:
-                    default: false
-                    description: |-
-                      AllowCrossTeam permits resolution of agents managed by other SwarmTeams.
-                      Default false - only agents not owned by another team's inline roles.
-                    type: boolean
-                  maxDepth:
-                    default: 3
-                    description: |-
-                      MaxDepth is the maximum agent-to-agent delegation depth.
-                      Prevents runaway recursion.
-                    maximum: 20
-                    minimum: 1
-                    type: integer
-                type: object
               scope:
                 allOf:
                 - enum:
@@ -136,6 +127,7 @@ spec:
                         this capability.
                       items:
                         type: string
+                      maxItems: 1000
                       type: array
                     description:
                       description: |-
@@ -150,10 +142,12 @@ spec:
                         capability across all agents.
                       items:
                         type: string
+                      maxItems: 100
                       type: array
                   required:
                   - id
                   type: object
+                maxItems: 200
                 type: array
               conditions:
                 description: Conditions reflect the current state of the SwarmRegistry.
@@ -229,6 +223,7 @@ spec:
                         contributes to the index.
                       items:
                         type: string
+                      maxItems: 200
                       type: array
                     dailyTokens:
                       description: DailyTokens is the rolling 24h token usage copied
@@ -252,6 +247,7 @@ spec:
                   - name
                   - readyReplicas
                   type: object
+                maxItems: 1000
                 type: array
               indexedAgents:
                 description: IndexedAgents is the total number of SwarmAgents indexed

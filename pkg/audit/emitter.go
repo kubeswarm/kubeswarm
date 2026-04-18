@@ -91,11 +91,7 @@ func (e *Emitter) Emit(event AuditEvent) {
 		// Buffer full - evict oldest to make room.
 		select {
 		case <-e.ch:
-			total := e.dropped.Add(1)
-			if total == 1 || total%100 == 0 {
-				slog.Warn("audit events dropped due to buffer overflow",
-					"total_dropped", total, "buffer_size", cap(e.ch))
-			}
+			e.recordDrop()
 		default:
 		}
 		// Try again after eviction.
@@ -103,12 +99,17 @@ func (e *Emitter) Emit(event AuditEvent) {
 		case e.ch <- event:
 		default:
 			// Still full (concurrent writers) - drop the new event.
-			total := e.dropped.Add(1)
-			if total == 1 || total%100 == 0 {
-				slog.Warn("audit events dropped due to buffer overflow",
-					"total_dropped", total, "buffer_size", cap(e.ch))
-			}
+			e.recordDrop()
 		}
+	}
+}
+
+// recordDrop increments the drop counter and logs periodically.
+func (e *Emitter) recordDrop() {
+	total := e.dropped.Add(1)
+	if total == 1 || total%100 == 0 {
+		slog.Warn("audit events dropped due to buffer overflow",
+			"total_dropped", total, "buffer_size", cap(e.ch))
 	}
 }
 
@@ -140,15 +141,33 @@ func (e *Emitter) Close(ctx context.Context) {
 	})
 }
 
+// maxBatchSize is the maximum number of events drained per sink.Emit call.
+const maxBatchSize = 64
+
 // loop is the background goroutine that reads events from the channel and
-// dispatches them to the sink one at a time.
+// dispatches them to the sink in batches.
 func (e *Emitter) loop() {
 	defer close(e.done)
 
+	batch := make([]AuditEvent, 0, maxBatchSize)
 	for event := range e.ch {
+		batch = append(batch[:0], event)
+		// Drain up to maxBatchSize-1 more events without blocking.
+	drain:
+		for len(batch) < maxBatchSize {
+			select {
+			case ev, ok := <-e.ch:
+				if !ok {
+					break drain
+				}
+				batch = append(batch, ev)
+			default:
+				break drain
+			}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := e.sink.Emit(ctx, []AuditEvent{event}); err != nil {
-			slog.Warn("audit sink emit failed", "error", err, "action", string(event.Action))
+		if err := e.sink.Emit(ctx, batch); err != nil {
+			slog.Warn("audit sink emit failed", "error", err, "batch_size", len(batch))
 		}
 		cancel()
 	}

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -26,6 +27,18 @@ import (
 
 	"github.com/kubeswarm/kubeswarm/pkg/observability"
 )
+
+var (
+	operatorMetricsOnce sync.Once
+	operatorMetrics     *observability.OperatorMetrics
+)
+
+func getOperatorMetrics() *observability.OperatorMetrics {
+	operatorMetricsOnce.Do(func() {
+		operatorMetrics, _ = observability.NewOperatorMetrics()
+	})
+	return operatorMetrics
+}
 
 // metricsReconciler wraps any reconcile.Reconciler and records
 // kubeswarm.reconcile.duration and kubeswarm.reconcile.errors metrics.
@@ -40,8 +53,8 @@ type metricsReconciler struct {
 // If NewOperatorMetrics fails (which only happens on SDK misconfiguration), the
 // original reconciler is returned unwrapped.
 func WithMetrics(r reconcile.Reconciler, controller string) reconcile.Reconciler {
-	om, err := observability.NewOperatorMetrics()
-	if err != nil {
+	om := getOperatorMetrics()
+	if om == nil {
 		return r
 	}
 	return &metricsReconciler{inner: r, metrics: om, controller: controller}

@@ -24,8 +24,65 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/scheme"
 )
 
-// ConditionReady is the standard condition type used across all Swarm resources.
-const ConditionReady = "Ready"
+// Condition types used across Swarm resources.
+const (
+	ConditionReady            = "Ready"
+	ConditionBudgetExceeded   = "BudgetExceeded"
+	ConditionBudgetWarning    = "BudgetWarning"
+	ConditionBudgetOK         = "OK"
+	ConditionRegistryNotFound = "RegistryNotFound"
+	ConditionMCPDegraded      = "MCPDegraded"
+)
+
+// Label and annotation keys used across controllers.
+const (
+	// AnnotationTeamQueueURL is the per-agent team queue URL.
+	AnnotationTeamQueueURL = "kubeswarm/team-queue-url"
+
+	// LabelTeam identifies the SwarmTeam that owns a resource.
+	LabelTeam = "kubeswarm/team"
+
+	// LabelTrigger identifies the SwarmEvent that created a run.
+	LabelTrigger = "kubeswarm/trigger"
+
+	// LabelTriggerTemplate identifies the template team used by a trigger.
+	LabelTriggerTemplate = "kubeswarm/trigger-template"
+
+	// AnnotationStreamKey is the queue stream key for a trigger-created run.
+	AnnotationStreamKey = "kubeswarm/stream-key"
+
+	// AnnotationTeamRoutes is the JSON delegate-route map set by the team controller.
+	AnnotationTeamRoutes = "kubeswarm/team-routes"
+
+	// AnnotationTeamRole is the role name assigned by the team controller.
+	AnnotationTeamRole = "kubeswarm/team-role"
+
+	// AnnotationTeamArtifactStore is the artifact store URL set by the team controller.
+	AnnotationTeamArtifactStore = "kubeswarm/team-artifact-store-url"
+
+	// AnnotationTeamArtifactClaim is the PVC claim name for team artifacts.
+	AnnotationTeamArtifactClaim = "kubeswarm/team-artifact-claim"
+
+	// AnnotationTeamArtifactCredentials is the Secret name containing cloud credentials
+	// for the artifact store (e.g. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for S3).
+	AnnotationTeamArtifactCredentials = "kubeswarm/team-artifact-credentials" //nolint:gosec // annotation key, not a credential
+
+	// AnnotationSystemPromptHash triggers rolling restarts when the prompt changes.
+	AnnotationSystemPromptHash = "kubeswarm/system-prompt-hash"
+
+	// AnnotationAPIKeyVersion triggers rolling restarts on key rotation.
+	AnnotationAPIKeyVersion = "kubeswarm/api-key-version" //nolint:gosec // annotation key, not a credential
+
+	// AnnotationManaged marks auto-created resources as operator-managed.
+	AnnotationManaged = "kubeswarm/managed"
+
+	// LabelRole identifies the role within a SwarmTeam.
+	LabelRole = "kubeswarm/role"
+)
+
+// PromptWarnBytes is the per-role inline prompt size (bytes) at which a warning is issued.
+// Shared between the admission webhook and the team controller.
+const PromptWarnBytes = 50 * 1024 // 50 KB
 
 var (
 	// GroupVersion is group version used to register these objects.

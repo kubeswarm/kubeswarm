@@ -28,6 +28,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -64,10 +65,11 @@ type NotifyPayload struct {
 	DashboardURL string `json:"dashboardURL,omitempty"`
 }
 
-// rateLimitKey uniquely identifies a (namespace, team, event) tuple for rate limiting.
+// rateLimitKey uniquely identifies a (namespace, owner, event) tuple for rate limiting.
+// owner is the SwarmTeam name (for team runs) or SwarmAgent name (for standalone runs).
 type rateLimitKey struct {
 	namespace string
-	team      string
+	owner     string
 	event     kubeswarmv1alpha1.NotifyEvent
 }
 
@@ -82,6 +84,7 @@ func newNotifyRateLimiter() *notifyRateLimiter {
 }
 
 // allow returns true when the event may fire (respects the configured window).
+// Expired entries are evicted from the map so it stays bounded to recently-fired keys.
 func (rl *notifyRateLimiter) allow(key rateLimitKey, windowSecs int) bool {
 	if windowSecs == 0 {
 		return true
@@ -92,7 +95,11 @@ func (rl *notifyRateLimiter) allow(key rateLimitKey, windowSecs int) bool {
 	if !ok {
 		return true
 	}
-	return time.Since(last) >= time.Duration(windowSecs)*time.Second
+	if time.Since(last) >= time.Duration(windowSecs)*time.Second {
+		delete(rl.fired, key) // evict expired entry; re-added by record() if it fires again
+		return true
+	}
+	return false
 }
 
 func (rl *notifyRateLimiter) record(key rateLimitKey) {
@@ -118,36 +125,31 @@ func NewNotifyDispatcher(c client.Client) *NotifyDispatcher {
 }
 
 // DispatchRun fires notifications for a terminal SwarmRun phase transition.
-// It looks up the parent SwarmTeam's notifyRef and dispatches to all matching channels.
+// It resolves notifyRef from either the parent SwarmTeam (for team runs) or
+// the target SwarmAgent's observability config (for standalone agent runs).
 // Best-effort: errors are logged but do not affect the reconcile result.
 func (d *NotifyDispatcher) DispatchRun(ctx context.Context, run *kubeswarmv1alpha1.SwarmRun) {
 	logger := ctrl.Log.WithName("notify").WithValues("run", run.Name, "namespace", run.Namespace)
 
-	// Resolve the parent team.
-	team := &kubeswarmv1alpha1.SwarmTeam{}
-	if err := d.client.Get(ctx, types.NamespacedName{
-		Name:      run.Spec.TeamRef,
-		Namespace: run.Namespace,
-	}, team); err != nil {
-		logger.V(1).Info("could not fetch parent team for notification", "team", run.Spec.TeamRef)
+	// Resolve notifyRef: team runs use team.spec.notifyRef,
+	// standalone agent runs use agent.spec.observability.notifyRef.
+	notifyRef, rateLimitOwner := d.resolveNotifyRef(ctx, run)
+	if notifyRef == nil {
+		logger.V(1).Info("no notifyRef found for run", "team", run.Spec.TeamRef, "agent", run.Spec.Agent)
 		return
 	}
 
-	if team.Spec.NotifyRef == nil {
-		return
-	}
-
-	event := runPhaseToEvent(run.Status.Phase)
+	event := runPhaseToEvent(run)
 	if event == "" {
 		return
 	}
 
 	policy := &kubeswarmv1alpha1.SwarmNotify{}
 	if err := d.client.Get(ctx, types.NamespacedName{
-		Name:      team.Spec.NotifyRef.Name,
+		Name:      notifyRef.Name,
 		Namespace: run.Namespace,
 	}, policy); err != nil {
-		logger.Error(err, "could not fetch SwarmNotify policy", "policy", team.Spec.NotifyRef.Name)
+		logger.Error(err, "could not fetch SwarmNotify policy", "policy", notifyRef.Name)
 		return
 	}
 
@@ -155,7 +157,7 @@ func (d *NotifyDispatcher) DispatchRun(ctx context.Context, run *kubeswarmv1alph
 		return
 	}
 
-	key := rateLimitKey{namespace: run.Namespace, team: run.Spec.TeamRef, event: event}
+	key := rateLimitKey{namespace: run.Namespace, owner: rateLimitOwner, event: event}
 	if !d.rateLimiter.allow(key, policy.Spec.RateLimitSeconds) {
 		logger.V(1).Info("notification rate-limited", "event", event)
 		return
@@ -164,6 +166,144 @@ func (d *NotifyDispatcher) DispatchRun(ctx context.Context, run *kubeswarmv1alph
 
 	payload := buildRunPayload(run, event)
 	d.dispatch(ctx, payload, policy)
+}
+
+// DispatchAgentDegraded fires an AgentDegraded notification when an agent's
+// MCP health probes fail. Uses the agent's spec.observability.notifyRef or
+// spec.observability.healthCheck.notifyRef.
+func (d *NotifyDispatcher) DispatchAgentDegraded(ctx context.Context, agent *kubeswarmv1alpha1.SwarmAgent) {
+	logger := ctrl.Log.WithName("notify").WithValues("agent", agent.Name, "namespace", agent.Namespace)
+
+	var notifyRef *corev1.LocalObjectReference
+	if agent.Spec.Observability != nil {
+		if agent.Spec.Observability.NotifyRef != nil {
+			notifyRef = agent.Spec.Observability.NotifyRef
+		} else if agent.Spec.Observability.HealthCheck != nil && agent.Spec.Observability.HealthCheck.NotifyRef != nil {
+			notifyRef = agent.Spec.Observability.HealthCheck.NotifyRef
+		}
+	}
+	if notifyRef == nil {
+		logger.V(1).Info("no notifyRef for agent degraded notification")
+		return
+	}
+
+	event := kubeswarmv1alpha1.NotifyOnAgentDegraded
+
+	policy := &kubeswarmv1alpha1.SwarmNotify{}
+	if err := d.client.Get(ctx, types.NamespacedName{
+		Name:      notifyRef.Name,
+		Namespace: agent.Namespace,
+	}, policy); err != nil {
+		logger.Error(err, "could not fetch SwarmNotify policy", "policy", notifyRef.Name)
+		return
+	}
+
+	if !policyMatchesEvent(policy, event) {
+		return
+	}
+
+	key := rateLimitKey{namespace: agent.Namespace, owner: agent.Name, event: event}
+	if !d.rateLimiter.allow(key, policy.Spec.RateLimitSeconds) {
+		logger.V(1).Info("agent degraded notification rate-limited")
+		return
+	}
+	d.rateLimiter.record(key)
+
+	payload := NotifyPayload{
+		Event:     event,
+		Namespace: agent.Namespace,
+		Team:      agent.Name, // use Team field for the agent name in degraded notifications
+	}
+	d.dispatch(ctx, payload, policy)
+}
+
+// DispatchDailyLimitReached fires a DailyLimitReached notification when an
+// agent's rolling 24h token usage exceeds its daily limit.
+func (d *NotifyDispatcher) DispatchDailyLimitReached(ctx context.Context, agent *kubeswarmv1alpha1.SwarmAgent) {
+	logger := ctrl.Log.WithName("notify").WithValues("agent", agent.Name, "namespace", agent.Namespace)
+
+	var notifyRef *corev1.LocalObjectReference
+	if agent.Spec.Observability != nil && agent.Spec.Observability.NotifyRef != nil {
+		notifyRef = agent.Spec.Observability.NotifyRef
+	}
+	if notifyRef == nil {
+		logger.V(1).Info("no notifyRef for daily limit notification")
+		return
+	}
+
+	event := kubeswarmv1alpha1.NotifyOnDailyLimitReached
+
+	policy := &kubeswarmv1alpha1.SwarmNotify{}
+	if err := d.client.Get(ctx, types.NamespacedName{
+		Name:      notifyRef.Name,
+		Namespace: agent.Namespace,
+	}, policy); err != nil {
+		logger.Error(err, "could not fetch SwarmNotify policy", "policy", notifyRef.Name)
+		return
+	}
+
+	if !policyMatchesEvent(policy, event) {
+		return
+	}
+
+	key := rateLimitKey{namespace: agent.Namespace, owner: agent.Name, event: event}
+	if !d.rateLimiter.allow(key, policy.Spec.RateLimitSeconds) {
+		logger.V(1).Info("daily limit notification rate-limited")
+		return
+	}
+	d.rateLimiter.record(key)
+
+	payload := NotifyPayload{
+		Event:     event,
+		Namespace: agent.Namespace,
+		Team:      agent.Name,
+	}
+	d.dispatch(ctx, payload, policy)
+}
+
+// resolveNotifyRef finds the notifyRef for a SwarmRun by checking the parent
+// SwarmTeam first, then falling back to the target SwarmAgent's observability config.
+// Returns (notifyRef, rateLimitOwner) where rateLimitOwner is used for rate limit keying.
+func (d *NotifyDispatcher) resolveNotifyRef(ctx context.Context, run *kubeswarmv1alpha1.SwarmRun) (*corev1.LocalObjectReference, string) {
+	logger := ctrl.Log.WithName("notify").WithValues("run", run.Name, "namespace", run.Namespace)
+
+	// Path 1: team run - use team.spec.notifyRef only.
+	// Team runs never fall through to agent-level notifyRef to avoid silent
+	// notification source downgrade.
+	if run.Spec.TeamRef != "" {
+		team := &kubeswarmv1alpha1.SwarmTeam{}
+		if err := d.client.Get(ctx, types.NamespacedName{
+			Name:      run.Spec.TeamRef,
+			Namespace: run.Namespace,
+		}, team); err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.V(1).Info("parent team not found for notification", "team", run.Spec.TeamRef)
+			} else {
+				logger.Error(err, "transient error fetching parent team for notification", "team", run.Spec.TeamRef)
+			}
+			return nil, ""
+		}
+		if team.Spec.NotifyRef != nil {
+			return team.Spec.NotifyRef, run.Spec.TeamRef
+		}
+		// Team exists but has no notifyRef - no notification for this run.
+		return nil, ""
+	}
+
+	// Path 2: standalone agent run (no TeamRef) - use agent.spec.observability.notifyRef.
+	if run.Spec.Agent != "" {
+		agent := &kubeswarmv1alpha1.SwarmAgent{}
+		if err := d.client.Get(ctx, types.NamespacedName{
+			Name:      run.Spec.Agent,
+			Namespace: run.Namespace,
+		}, agent); err != nil {
+			logger.V(1).Info("could not fetch agent for notification", "agent", run.Spec.Agent, "err", err)
+		} else if agent.Spec.Observability != nil && agent.Spec.Observability.NotifyRef != nil {
+			return agent.Spec.Observability.NotifyRef, run.Spec.Agent
+		}
+	}
+
+	return nil, ""
 }
 
 // dispatch sends the payload to all configured channels in the policy.
@@ -385,11 +525,17 @@ func (d *NotifyDispatcher) updateDispatchStatus(
 }
 
 // runPhaseToEvent maps an SwarmRun terminal phase to the corresponding NotifyEvent.
-func runPhaseToEvent(phase kubeswarmv1alpha1.SwarmRunPhase) kubeswarmv1alpha1.NotifyEvent {
-	switch phase {
+func runPhaseToEvent(run *kubeswarmv1alpha1.SwarmRun) kubeswarmv1alpha1.NotifyEvent {
+	switch run.Status.Phase {
 	case kubeswarmv1alpha1.SwarmRunPhaseSucceeded:
 		return kubeswarmv1alpha1.NotifyOnTeamSucceeded
 	case kubeswarmv1alpha1.SwarmRunPhaseFailed:
+		// Distinguish timeout from generic failure by checking the Ready condition reason.
+		for _, c := range run.Status.Conditions {
+			if c.Type == kubeswarmv1alpha1.ConditionReady && c.Reason == "Timeout" {
+				return kubeswarmv1alpha1.NotifyOnTeamTimedOut
+			}
+		}
 		return kubeswarmv1alpha1.NotifyOnTeamFailed
 	}
 	return ""
@@ -515,7 +661,7 @@ func (d *NotifyDispatcher) DispatchBudget(
 		return
 	}
 
-	key := rateLimitKey{namespace: budget.Namespace, team: budget.Name, event: event}
+	key := rateLimitKey{namespace: budget.Namespace, owner: budget.Name, event: event}
 	if !d.rateLimiter.allow(key, policy.Spec.RateLimitSeconds) {
 		return
 	}
@@ -531,11 +677,22 @@ func (d *NotifyDispatcher) DispatchBudget(
 	d.dispatch(ctx, payload, policy)
 }
 
+// notifyTemplateCache caches parsed notification templates.
+var notifyTemplateCache sync.Map // map[string]*template.Template
+
 // renderTemplate renders a Go template with the payload as context.
+// Parsed templates are cached for repeated use with different payloads.
 func renderTemplate(tmplStr string, payload NotifyPayload) (string, error) {
-	tmpl, err := template.New("notify").Parse(tmplStr)
-	if err != nil {
-		return "", err
+	var tmpl *template.Template
+	if cached, ok := notifyTemplateCache.Load(tmplStr); ok {
+		tmpl = cached.(*template.Template)
+	} else {
+		var err error
+		tmpl, err = template.New("notify").Parse(tmplStr)
+		if err != nil {
+			return "", err
+		}
+		notifyTemplateCache.Store(tmplStr, tmpl)
 	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, payload); err != nil {

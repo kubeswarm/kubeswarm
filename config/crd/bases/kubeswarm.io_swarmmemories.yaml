@@ -199,6 +199,8 @@ spec:
               rule: self.backend == 'redis' || !has(self.redis)
             - message: vectorStore config can only be set when backend is vector-store
               rule: self.backend == 'vector-store' || !has(self.vectorStore)
+            - message: embedding config is required when backend is vector-store
+              rule: self.backend != 'vector-store' || has(self.embedding)
           status:
             description: SwarmMemoryStatus defines the observed state of SwarmMemory.
             properties:

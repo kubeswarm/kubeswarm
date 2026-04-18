@@ -28,12 +28,13 @@ import (
 
 // SumRunStepTokens accumulates token counts and cost for SwarmRun pipeline steps.
 func SumRunStepTokens(f *kubeswarmv1alpha1.SwarmRun) int64 {
-	var totalIn, totalOut int64
+	var totalIn, totalOut, totalThinking int64
 	var totalCost float64
 	for _, st := range f.Status.Steps {
 		if st.TokenUsage != nil {
 			totalIn += st.TokenUsage.InputTokens
 			totalOut += st.TokenUsage.OutputTokens
+			totalThinking += st.TokenUsage.ThinkingTokens
 		}
 		if st.CostUSD != "" {
 			if v, err := strconv.ParseFloat(st.CostUSD, 64); err == nil {
@@ -43,9 +44,10 @@ func SumRunStepTokens(f *kubeswarmv1alpha1.SwarmRun) int64 {
 	}
 	if totalIn > 0 || totalOut > 0 {
 		f.Status.TotalTokenUsage = &kubeswarmv1alpha1.TokenUsage{
-			InputTokens:  totalIn,
-			OutputTokens: totalOut,
-			TotalTokens:  totalIn + totalOut,
+			InputTokens:    totalIn,
+			OutputTokens:   totalOut,
+			ThinkingTokens: totalThinking,
+			TotalTokens:    totalIn + totalOut + totalThinking,
 		}
 	}
 	if totalCost > 0 {
@@ -91,7 +93,7 @@ func UpdateRunPipelinePhase(f *kubeswarmv1alpha1.SwarmRun, templateData map[stri
 	if f.Spec.MaxTokens > 0 && totalTokens > f.Spec.MaxTokens {
 		f.Status.Phase = kubeswarmv1alpha1.SwarmRunPhaseFailed
 		f.Status.CompletionTime = &now
-		SetRunCondition(f, metav1.ConditionFalse, "BudgetExceeded",
+		SetRunCondition(f, metav1.ConditionFalse, kubeswarmv1alpha1.ConditionBudgetExceeded,
 			fmt.Sprintf("token budget of %d exceeded: used %d", f.Spec.MaxTokens, totalTokens))
 		return
 	}

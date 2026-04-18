@@ -31,6 +31,7 @@ const (
 	ErrToolNotFound       ErrorCode = "ToolNotFound"
 	ErrToolExecFailed     ErrorCode = "ToolExecutionFailed"
 	ErrToolInvalidArgs    ErrorCode = "ToolInvalidArgs"
+	ErrToolDenied         ErrorCode = "ToolDenied"
 	ErrMemoryUnavailable  ErrorCode = "MemoryUnavailable"
 	ErrMemoryQueryFailed  ErrorCode = "MemoryQueryFailed"
 	ErrQueueFull          ErrorCode = "QueueFull"
@@ -50,12 +51,19 @@ var defaultSuggestions = map[ErrorCode]string{
 	ErrToolNotFound:       "Check that the MCP server is running and the tool name matches",
 	ErrToolExecFailed:     "Check MCP server logs for the root cause",
 	ErrToolInvalidArgs:    "Verify the tool's input schema matches the arguments the model sent",
+	ErrToolDenied:         "Check SwarmPolicy tool deny configuration",
 	ErrMemoryUnavailable:  "Check vector store connectivity and credentials",
 	ErrMemoryQueryFailed:  "Check vector store logs; the query may be malformed",
 	ErrQueueFull:          "Increase queue capacity or reduce task submission rate",
 	ErrQueueTimeout:       "Check Redis connectivity and queue health",
 	ErrConfigInvalid:      "Check agent environment variables and SwarmAgent spec",
 	ErrConfigMissing:      "Ensure required environment variables are set by the operator",
+}
+
+// SuggestionForCode returns the default user-facing suggestion for a given
+// error code. Returns an empty string for unknown codes.
+func SuggestionForCode(code ErrorCode) string {
+	return defaultSuggestions[code]
 }
 
 // AgentError is a structured error carrying a code, component, message,
@@ -78,64 +86,38 @@ func (e *AgentError) Unwrap() error {
 	return e.Cause
 }
 
-// WithSuggestion returns a shallow copy with the suggestion overridden.
-func (e *AgentError) WithSuggestion(s string) *AgentError {
-	cp := *e
-	cp.Suggestion = s
-	return &cp
+// NewAgentError creates an AgentError with the given component.
+func NewAgentError(component string, code ErrorCode, msg string, cause error) *AgentError {
+	return &AgentError{
+		Code:       code,
+		Component:  component,
+		Message:    msg,
+		Suggestion: defaultSuggestions[code],
+		Cause:      cause,
+	}
 }
 
 // NewLLMError creates an AgentError with Component="llm".
 func NewLLMError(code ErrorCode, msg string, cause error) *AgentError {
-	return &AgentError{
-		Code:       code,
-		Component:  "llm",
-		Message:    msg,
-		Suggestion: defaultSuggestions[code],
-		Cause:      cause,
-	}
+	return NewAgentError("llm", code, msg, cause)
 }
 
 // NewToolError creates an AgentError with Component="tool".
 func NewToolError(code ErrorCode, msg string, cause error) *AgentError {
-	return &AgentError{
-		Code:       code,
-		Component:  "tool",
-		Message:    msg,
-		Suggestion: defaultSuggestions[code],
-		Cause:      cause,
-	}
+	return NewAgentError("tool", code, msg, cause)
 }
 
 // NewMemoryError creates an AgentError with Component="memory".
 func NewMemoryError(code ErrorCode, msg string, cause error) *AgentError {
-	return &AgentError{
-		Code:       code,
-		Component:  "memory",
-		Message:    msg,
-		Suggestion: defaultSuggestions[code],
-		Cause:      cause,
-	}
+	return NewAgentError("memory", code, msg, cause)
 }
 
 // NewConfigError creates an AgentError with Component="config".
 func NewConfigError(code ErrorCode, msg string, cause error) *AgentError {
-	return &AgentError{
-		Code:       code,
-		Component:  "config",
-		Message:    msg,
-		Suggestion: defaultSuggestions[code],
-		Cause:      cause,
-	}
+	return NewAgentError("config", code, msg, cause)
 }
 
 // NewQueueError creates a queue-component AgentError.
 func NewQueueError(code ErrorCode, msg string, cause error) *AgentError {
-	return &AgentError{
-		Code:       code,
-		Component:  "queue",
-		Message:    msg,
-		Suggestion: defaultSuggestions[code],
-		Cause:      cause,
-	}
+	return NewAgentError("queue", code, msg, cause)
 }

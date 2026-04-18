@@ -25,9 +25,11 @@ import (
 	"net"
 	neturl "net/url"
 	"os"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -40,6 +42,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -47,6 +50,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kubeswarmv1alpha1 "github.com/kubeswarm/kubeswarm/api/v1alpha1"
+	"github.com/kubeswarm/kubeswarm/pkg/agent/providers"
 	pkgflow "github.com/kubeswarm/kubeswarm/pkg/flow"
 )
 
@@ -60,14 +64,6 @@ const (
 	// an SwarmAgent in a namespace so agent pods can emit K8s Events for audit logging.
 	agentServiceAccount = "swarm-agent"
 
-	// Annotations set by the SwarmTeam controller on SwarmAgent resources.
-	// Explicit env vars injected from these take precedence over EnvFrom values.
-	annotationTeamQueueURL      = "kubeswarm/team-queue-url"
-	annotationTeamRoutes        = "kubeswarm/team-routes"
-	annotationTeamRole          = "kubeswarm/team-role"
-	annotationTeamArtifactStore = "kubeswarm/team-artifact-store-url"
-	annotationTeamArtifactClaim = "kubeswarm/team-artifact-claim"
-
 	// MCP server auth types used when building runtime config and volumes.
 	mcpAuthBearer = "bearer"
 	mcpAuthMTLS   = "mtls"
@@ -75,11 +71,15 @@ const (
 	// Default resource constraints injected into agent pods when spec.resources is not set.
 	// These ensure every agent pod has explicit limits, preventing a runaway agent from
 	// consuming unbounded node resources (RFC-0016 Phase 1).
-	defaultCPURequest            = "100m"
-	defaultCPULimit              = "500m"
-	defaultMemoryRequest         = "128Mi"
-	defaultMemoryLimit           = "512Mi"
-	defaultEphemeralStorageLimit = "256Mi"
+)
+
+// Default resource quantities parsed once at startup.
+var (
+	defaultCPURequestQty            = resource.MustParse("100m")
+	defaultCPULimitQty              = resource.MustParse("500m")
+	defaultMemoryRequestQty         = resource.MustParse("128Mi")
+	defaultMemoryLimitQty           = resource.MustParse("512Mi")
+	defaultEphemeralStorageLimitQty = resource.MustParse("256Mi")
 )
 
 // defaultAgentResources returns the safe default resource requirements injected into
@@ -87,13 +87,13 @@ const (
 func defaultAgentResources() corev1.ResourceRequirements {
 	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse(defaultCPURequest),
-			corev1.ResourceMemory: resource.MustParse(defaultMemoryRequest),
+			corev1.ResourceCPU:    defaultCPURequestQty.DeepCopy(),
+			corev1.ResourceMemory: defaultMemoryRequestQty.DeepCopy(),
 		},
 		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:              resource.MustParse(defaultCPULimit),
-			corev1.ResourceMemory:           resource.MustParse(defaultMemoryLimit),
-			corev1.ResourceEphemeralStorage: resource.MustParse(defaultEphemeralStorageLimit),
+			corev1.ResourceCPU:              defaultCPULimitQty.DeepCopy(),
+			corev1.ResourceMemory:           defaultMemoryLimitQty.DeepCopy(),
+			corev1.ResourceEphemeralStorage: defaultEphemeralStorageLimitQty.DeepCopy(),
 		},
 	}
 }
@@ -111,7 +111,7 @@ func agentResources(swarmAgent *kubeswarmv1alpha1.SwarmAgent) corev1.ResourceReq
 		r.Limits = corev1.ResourceList{}
 	}
 	if _, ok := r.Limits[corev1.ResourceEphemeralStorage]; !ok {
-		r.Limits[corev1.ResourceEphemeralStorage] = resource.MustParse(defaultEphemeralStorageLimit)
+		r.Limits[corev1.ResourceEphemeralStorage] = defaultEphemeralStorageLimitQty.DeepCopy()
 	}
 	return r
 }
@@ -132,6 +132,16 @@ type SwarmAgentReconciler struct {
 	// Used to scope the Redis egress rule in generated NetworkPolicies to the correct
 	// namespace regardless of how the operator is deployed.
 	OperatorNamespace string
+
+	// registryEnsured tracks namespaces where ensureDefaultRegistry has already succeeded,
+	// avoiding a Get on every reconcile for the common steady-state path.
+	registryEnsured sync.Map // map[string]struct{}
+	// saEnsured tracks namespaces where SA/Role/RoleBinding already exist,
+	// avoiding 3 Gets every reconcile once they're confirmed present.
+	saEnsured sync.Map // map[string]struct{}
+	// NotifyDispatcher dispatches notifications for agent-level events (e.g. AgentDegraded).
+	// When nil, agent notifications are disabled.
+	NotifyDispatcher *NotifyDispatcher
 }
 
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmagents,verbs=get;list;watch;create;update;patch;delete
@@ -143,7 +153,7 @@ type SwarmAgentReconciler struct {
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmevents/finalizers,verbs=update
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmmemories,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmsettings,verbs=get;list;watch
-// +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmregistries,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmregistries,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmruns,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -153,7 +163,7 @@ type SwarmAgentReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch
 
-func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	logger := log.FromContext(ctx)
 
 	// 1. Fetch the SwarmAgent CR.
@@ -170,6 +180,20 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
+	// Single deferred status write: persists all in-memory status mutations
+	// (conditions, toolConnections, advisorConnections, etc.) on every exit
+	// path. This replaces scattered Status().Update calls that were prone to
+	// missed writes when new steps were added.
+	defer func() {
+		if err := r.Status().Update(ctx, swarmAgent); err != nil {
+			if retErr == nil {
+				retErr = fmt.Errorf("status update: %w", err)
+			} else {
+				logger.Error(err, "failed to persist status on error path")
+			}
+		}
+	}()
+
 	// 2a. Ensure a "default" SwarmRegistry exists in this namespace.
 	// Non-blocking: a creation error is logged but does not prevent agent reconciliation.
 	if err := r.ensureDefaultRegistry(ctx, req.Namespace); err != nil {
@@ -182,6 +206,16 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
+	// 3a. Record which settings were applied and how many fragments were composed.
+	settingsNames := make([]string, len(allSettings))
+	totalFragments := 0
+	for i, s := range allSettings {
+		settingsNames[i] = s.Name
+		totalFragments += len(s.Spec.Fragments)
+	}
+	swarmAgent.Status.AppliedSettings = settingsNames
+	swarmAgent.Status.AppliedFragmentCount = totalFragments
+
 	// 3a-bis. Compute effective reasoning config from the SwarmSettings cascade
 	// and set the ReasoningActive status condition per RFC-0033 DD7. This runs
 	// on every reconcile and before deployment logic so the condition is always
@@ -189,29 +223,16 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	r.applyReasoningCondition(swarmAgent, allSettings)
 
 	// 3b. Optionally load the referenced SwarmMemory.
-	var swarmMemory *kubeswarmv1alpha1.SwarmMemory
-	if swarmAgent.Spec.Runtime.Loop != nil &&
-		swarmAgent.Spec.Runtime.Loop.Memory != nil && swarmAgent.Spec.Runtime.Loop.Memory.Ref != nil {
-		mem := &kubeswarmv1alpha1.SwarmMemory{}
-		if err := r.Get(ctx, client.ObjectKey{
-			Name:      swarmAgent.Spec.Runtime.Loop.Memory.Ref.Name,
-			Namespace: swarmAgent.Namespace,
-		}, mem); err != nil {
-			if !errors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf("fetching SwarmMemory %q: %w", swarmAgent.Spec.Runtime.Loop.Memory.Ref.Name, err)
-			}
-			logger.Info("SwarmMemory not found, proceeding without it", "memoryRef", swarmAgent.Spec.Runtime.Loop.Memory.Ref.Name)
-		} else {
-			swarmMemory = mem
-		}
+	swarmMemory, err := r.loadSwarmMemory(ctx, swarmAgent)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// 3c. Resolve the effective system prompt (inline or from ConfigMap/Secret).
 	resolvedPrompt, err := r.resolveSystemPrompt(ctx, swarmAgent)
 	if err != nil {
 		logger.Error(err, "failed to resolve systemPrompt")
-		r.setCondition(swarmAgent, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "PromptResolutionError", err.Error())
-		_ = r.Status().Update(ctx, swarmAgent)
+		setCondition(&swarmAgent.Status.Conditions, swarmAgent.Generation, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "PromptResolutionError", err.Error())
 		return ctrl.Result{}, err
 	}
 
@@ -223,8 +244,7 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	apiKeyEnvVar, apiKeyVersion, err := r.resolveAPIKeyEnvVar(ctx, swarmAgent)
 	if err != nil {
 		logger.Error(err, "failed to resolve apiKeyRef")
-		r.setCondition(swarmAgent, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "APIKeyResolutionError", err.Error())
-		_ = r.Status().Update(ctx, swarmAgent)
+		setCondition(&swarmAgent.Status.Conditions, swarmAgent.Generation, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "APIKeyResolutionError", err.Error())
 		return ctrl.Result{}, err
 	}
 
@@ -232,8 +252,7 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	resolvedMCPServers, err := r.resolveMCPServers(ctx, swarmAgent)
 	if err != nil {
 		logger.Error(err, "failed to resolve MCP capabilityRefs")
-		r.setCondition(swarmAgent, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "MCPResolutionError", err.Error())
-		_ = r.Status().Update(ctx, swarmAgent)
+		setCondition(&swarmAgent.Status.Conditions, swarmAgent.Generation, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "MCPResolutionError", err.Error())
 		return ctrl.Result{}, err
 	}
 
@@ -257,7 +276,6 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.reconcileAgentServiceAccount(ctx, swarmAgent); err != nil {
 		logger.Error(err, "failed to reconcile agent ServiceAccount")
 		r.setCondition(swarmAgent, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "ReconcileError", err.Error())
-		_ = r.Status().Update(ctx, swarmAgent)
 		return ctrl.Result{}, err
 	}
 
@@ -267,15 +285,29 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.reconcilePromptConfigMap(ctx, swarmAgent, assembledPrompt); err != nil {
 		logger.Error(err, "failed to reconcile prompt ConfigMap")
 		r.setCondition(swarmAgent, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "ReconcileError", err.Error())
-		_ = r.Status().Update(ctx, swarmAgent)
 		return ctrl.Result{}, err
 	}
 
+	// 5c. Fetch effective SwarmPolicy for this namespace (RFC-0049 Phase 5).
+	// Non-blocking: if policies can't be listed, the agent runs with its own limits.
+	effectivePolicy := r.fetchEffectivePolicy(ctx, req.Namespace)
+
 	// 6. Reconcile the owned k8s Deployment (budget check may override replicas to 0).
-	if err := r.reconcileDeployment(ctx, swarmAgent, allSettings, swarmMemory, resolvedPrompt, apiKeyEnvVar, apiKeyVersion, resolvedMCPServers); err != nil {
+	// Gateway capabilities are resolved inside reconcileDeployment so transient
+	// registry-lookup errors flow through the existing deployment-error branch
+	// rather than adding a separate one.
+	if err := r.reconcileDeployment(ctx, deploymentInput{
+		swarmAgent:         swarmAgent,
+		allSettings:        allSettings,
+		swarmMemory:        swarmMemory,
+		assembledPrompt:    assembledPrompt,
+		apiKeyEnvVar:       apiKeyEnvVar,
+		apiKeyVersion:      apiKeyVersion,
+		resolvedMCPServers: resolvedMCPServers,
+		effectivePolicy:    effectivePolicy,
+	}); err != nil {
 		logger.Error(err, "failed to reconcile Deployment")
 		r.setCondition(swarmAgent, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "ReconcileError", err.Error())
-		_ = r.Status().Update(ctx, swarmAgent)
 		return ctrl.Result{}, err
 	}
 
@@ -283,7 +315,6 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.reconcileNetworkPolicy(ctx, swarmAgent, resolvedMCPServers); err != nil {
 		logger.Error(err, "failed to reconcile NetworkPolicy")
 		r.setCondition(swarmAgent, kubeswarmv1alpha1.ConditionReady, metav1.ConditionFalse, "NetworkPolicyError", err.Error())
-		_ = r.Status().Update(ctx, swarmAgent)
 		return ctrl.Result{}, err
 	}
 
@@ -302,16 +333,24 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	// 8. Probe MCP server health and surface results in status.toolConnections[].
-	mcpRequeue, err := r.reconcileMCPHealth(ctx, swarmAgent, resolvedMCPServers)
-	if err != nil {
-		logger.Error(err, "failed to reconcile MCP health")
-	}
+	// 9. Probe MCP server health and surface results in status.toolConnections[].
+	mcpRequeue := r.reconcileMCPHealth(swarmAgent, resolvedMCPServers)
 	if mcpRequeue > 0 && (requeueAfter == 0 || mcpRequeue < requeueAfter) {
 		requeueAfter = mcpRequeue
 	}
 
-	// 9. Reconcile KEDA ScaledObject when autoscaling is configured.
+	// 9b. Reconcile advisor connections: check targets, set status and condition (RFC-0048).
+	advisorStatuses, advisorCondition := reconcileAdvisorConnections(ctx, r.Client, swarmAgent)
+	swarmAgent.Status.AdvisorConnections = advisorStatuses
+	setCondition(&swarmAgent.Status.Conditions, swarmAgent.Generation, kubeswarmv1alpha1.ConditionAdvisorsReady, advisorCondition.Status, advisorCondition.Reason, advisorCondition.Message)
+
+	// 9c. Reconcile tool-role agent connections: check targets, set status.
+	swarmAgent.Status.ToolAgentConnections = reconcileToolAgentConnections(ctx, r.Client, swarmAgent)
+
+	// 9d. Surface dedup config in status.
+	swarmAgent.Status.DedupEnabled = swarmAgent.Spec.Runtime.Loop != nil && swarmAgent.Spec.Runtime.Loop.Dedup
+
+	// 10. Reconcile KEDA ScaledObject when autoscaling is configured.
 	if err := r.reconcileKEDA(ctx, swarmAgent); err != nil {
 		logger.Error(err, "failed to reconcile KEDA ScaledObject")
 	}
@@ -319,24 +358,97 @@ func (r *SwarmAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
-func (r *SwarmAgentReconciler) reconcileDeployment(
+// loadSwarmMemory loads the SwarmMemory referenced by spec.runtime.loop.memory.ref.
+// Returns nil, nil when no memory is configured or the referenced object is not found.
+func (r *SwarmAgentReconciler) loadSwarmMemory(
 	ctx context.Context,
-	swarmAgent *kubeswarmv1alpha1.SwarmAgent,
-	allSettings []kubeswarmv1alpha1.SwarmSettings,
-	swarmMemory *kubeswarmv1alpha1.SwarmMemory,
-	resolvedPrompt string,
-	apiKeyEnvVar *corev1.EnvVar,
-	apiKeyVersion string,
-	resolvedMCPServers []kubeswarmv1alpha1.MCPToolSpec,
-) error {
-	desired := r.buildDeployment(swarmAgent, allSettings, swarmMemory, resolvedPrompt, apiKeyEnvVar, apiKeyVersion, resolvedMCPServers)
+	agent *kubeswarmv1alpha1.SwarmAgent,
+) (*kubeswarmv1alpha1.SwarmMemory, error) {
+	if agent.Spec.Runtime.Loop == nil ||
+		agent.Spec.Runtime.Loop.Memory == nil || agent.Spec.Runtime.Loop.Memory.Ref == nil {
+		return nil, nil
+	}
+	mem := &kubeswarmv1alpha1.SwarmMemory{}
+	if err := r.Get(ctx, client.ObjectKey{
+		Name:      agent.Spec.Runtime.Loop.Memory.Ref.Name,
+		Namespace: agent.Namespace,
+	}, mem); err != nil {
+		if errors.IsNotFound(err) {
+			log.FromContext(ctx).Info("SwarmMemory not found, proceeding without it",
+				"memoryRef", agent.Spec.Runtime.Loop.Memory.Ref.Name)
+			return nil, nil
+		}
+		return nil, fmt.Errorf("fetching SwarmMemory %q: %w", agent.Spec.Runtime.Loop.Memory.Ref.Name, err)
+	}
+	return mem, nil
+}
 
-	if err := ctrl.SetControllerReference(swarmAgent, desired, r.Scheme); err != nil {
+// fetchEffectivePolicy reads the pre-merged effective policy from the first
+// SwarmPolicy's status (computed by SwarmPolicyReconciler). Falls back to
+// merging on the fly if no status is populated yet. Returns nil if no
+// policies exist or if listing fails (non-blocking).
+func (r *SwarmAgentReconciler) fetchEffectivePolicy(ctx context.Context, namespace string) *kubeswarmv1alpha1.EffectivePolicySpec {
+	var policyList kubeswarmv1alpha1.SwarmPolicyList
+	if err := r.List(ctx, &policyList, client.InNamespace(namespace)); err != nil {
+		log.FromContext(ctx).Error(err, "failed to list SwarmPolicies for effective guardrails")
+		return nil
+	}
+	if len(policyList.Items) == 0 {
+		return nil
+	}
+	// Prefer the pre-computed effective policy from status (avoids re-merging).
+	for i := range policyList.Items {
+		if ep := policyList.Items[i].Status.EffectivePolicy; ep != nil {
+			return ep
+		}
+	}
+	// Fallback: policy reconciler hasn't run yet - merge on the fly.
+	ep, _ := MergePolicies(policyList.Items)
+	return ep
+}
+
+// deploymentInput groups all inputs needed to build or reconcile the agent Deployment.
+type deploymentInput struct {
+	swarmAgent          *kubeswarmv1alpha1.SwarmAgent
+	allSettings         []kubeswarmv1alpha1.SwarmSettings
+	swarmMemory         *kubeswarmv1alpha1.SwarmMemory
+	assembledPrompt     string
+	apiKeyEnvVar        *corev1.EnvVar
+	apiKeyVersion       string
+	resolvedMCPServers  []kubeswarmv1alpha1.MCPToolSpec
+	effectivePolicy     *kubeswarmv1alpha1.EffectivePolicySpec
+	gatewayCapabilities []GatewayCapabilityEntry // RFC-0052, populated inside reconcileDeployment
+}
+
+func (r *SwarmAgentReconciler) reconcileDeployment(ctx context.Context, in deploymentInput) error {
+	// Resolve gateway capabilities before building the Deployment so transient
+	// registry-lookup errors requeue instead of leaving the pod with a stale or
+	// misleading AGENT_GATEWAY_CAPABILITIES env var.
+	caps, err := r.resolveGatewayCapsForReconcile(ctx, in.swarmAgent)
+	if err != nil {
+		return err
+	}
+	in.gatewayCapabilities = caps
+
+	// Update gateway status fields so operators can observe capability counts.
+	if in.swarmAgent.Spec.Gateway != nil {
+		filtered := filterCapabilities(in.swarmAgent.Spec.Gateway, caps)
+		now := metav1.Now()
+		in.swarmAgent.Status.Gateway = &kubeswarmv1alpha1.GatewayStatus{
+			RoutableCapabilities:      int32(len(filtered)),
+			TotalMatchingCapabilities: int32(len(caps)),
+			LastCapabilitySync:        &now,
+		}
+	}
+
+	desired := r.buildDeployment(in)
+
+	if err := ctrl.SetControllerReference(in.swarmAgent, desired, r.Scheme); err != nil {
 		return err
 	}
 
 	existing := &appsv1.Deployment{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(desired), existing)
+	err = r.Get(ctx, client.ObjectKeyFromObject(desired), existing)
 	if errors.IsNotFound(err) {
 		return r.Create(ctx, desired)
 	}
@@ -344,7 +456,8 @@ func (r *SwarmAgentReconciler) reconcileDeployment(
 		return err
 	}
 
-	patch := client.MergeFrom(existing.DeepCopy())
+	original := existing.DeepCopy()
+	patch := client.MergeFrom(original)
 	existing.Spec.Replicas = desired.Spec.Replicas
 	existing.Spec.Template.Annotations = desired.Spec.Template.Annotations
 	// Only update the fields that the operator controls - env vars, image, and pull policy.
@@ -366,6 +479,13 @@ func (r *SwarmAgentReconciler) reconcileDeployment(
 	}
 	// mTLS volumes change when MCP servers are added/removed/reconfigured.
 	existing.Spec.Template.Spec.Volumes = desired.Spec.Template.Spec.Volumes
+
+	// Guard: skip the patch if nothing changed. Compare against the original
+	// snapshot (before mutation) so that env-var-only changes are detected.
+	if reflect.DeepEqual(original.Spec, existing.Spec) {
+		return nil
+	}
+
 	return r.Patch(ctx, existing, patch)
 }
 
@@ -410,6 +530,11 @@ func (r *SwarmAgentReconciler) reconcilePromptConfigMap(
 	}
 	if err != nil {
 		return err
+	}
+
+	// Guard: skip the patch if the prompt hasn't changed.
+	if existing.Data[promptConfigMapKey] == assembledPrompt {
+		return nil
 	}
 
 	patch := client.MergeFrom(existing.DeepCopy())
@@ -474,10 +599,10 @@ func (r *SwarmAgentReconciler) buildNetworkPolicy(
 		MatchLabels: map[string]string{"kubeswarm/deployment": swarmAgent.Name},
 	}
 
-	dnsPort53UDP := intstrFromInt32(53)
-	dnsPort53TCP := intstrFromInt32(53)
-	redisPort := intstrFromInt32(6379)
-	httpsPort := intstrFromInt32(443)
+	dnsPort53UDP := intstr.FromInt32(53)
+	dnsPort53TCP := intstr.FromInt32(53)
+	redisPort := intstr.FromInt32(6379)
+	httpsPort := intstr.FromInt32(443)
 
 	dnsEgress := networkingv1.NetworkPolicyEgressRule{
 		Ports: []networkingv1.NetworkPolicyPort{
@@ -545,19 +670,40 @@ func (r *SwarmAgentReconciler) buildNetworkPolicy(
 
 // resolveMCPIPs resolves the hostnames of MCP server URLs to /32 ipBlock peers for
 // strict-mode NetworkPolicy generation. Returns an error if any hostname fails DNS lookup.
+// DNS lookups are fanned out concurrently.
 func resolveMCPIPs(servers []kubeswarmv1alpha1.MCPToolSpec) ([]networkingv1.NetworkPolicyPeer, error) {
-	seen := make(map[string]struct{})
-	var peers []networkingv1.NetworkPolicyPeer
-	for _, s := range servers {
+	type result struct {
+		name     string
+		hostname string
+		addrs    []string
+		err      error
+	}
+	results := make([]result, len(servers))
+	var wg sync.WaitGroup
+	for i, s := range servers {
 		u, err := neturl.Parse(s.URL)
 		if err != nil || u.Hostname() == "" {
 			continue
 		}
-		addrs, err := net.LookupHost(u.Hostname())
-		if err != nil {
-			return nil, fmt.Errorf("DNS lookup for MCP server %q (%s): %w", s.Name, u.Hostname(), err)
+		wg.Add(1)
+		go func(idx int, name, hostname string) {
+			defer wg.Done()
+			addrs, err := net.LookupHost(hostname)
+			results[idx] = result{name: name, hostname: hostname, addrs: addrs, err: err}
+		}(i, s.Name, u.Hostname())
+	}
+	wg.Wait()
+
+	seen := make(map[string]struct{})
+	var peers []networkingv1.NetworkPolicyPeer
+	for _, r := range results {
+		if r.hostname == "" {
+			continue
 		}
-		for _, addr := range addrs {
+		if r.err != nil {
+			return nil, fmt.Errorf("DNS lookup for MCP server %q (%s): %w", r.name, r.hostname, r.err)
+		}
+		for _, addr := range r.addrs {
 			cidr := addr + "/32"
 			if _, ok := seen[cidr]; ok {
 				continue
@@ -609,15 +755,32 @@ func (r *SwarmAgentReconciler) syncStatus(
 		condStatus = metav1.ConditionTrue
 		condReason = "AllReplicasReady"
 	}
+	// Guard: skip the status write if nothing changed.
+	existingCond := apimeta.FindStatusCondition(swarmAgent.Status.Conditions, kubeswarmv1alpha1.ConditionReady)
+	if swarmAgent.Status.Replicas == dep.Status.Replicas &&
+		swarmAgent.Status.ReadyReplicas == dep.Status.ReadyReplicas &&
+		swarmAgent.Status.ObservedGeneration == swarmAgent.Generation &&
+		slices.Equal(swarmAgent.Status.ExposedMCPCapabilities, exposedIDs) &&
+		existingCond != nil &&
+		existingCond.Status == condStatus &&
+		existingCond.Reason == condReason {
+		return nil
+	}
+
 	r.setCondition(swarmAgent, kubeswarmv1alpha1.ConditionReady, condStatus, condReason, condMsg)
 
 	return r.Status().Update(ctx, swarmAgent)
 }
 
-func (r *SwarmAgentReconciler) buildDeployment(swarmAgent *kubeswarmv1alpha1.SwarmAgent, allSettings []kubeswarmv1alpha1.SwarmSettings, swarmMemory *kubeswarmv1alpha1.SwarmMemory, resolvedPrompt string, apiKeyEnvVar *corev1.EnvVar, apiKeyVersion string, resolvedMCPServers []kubeswarmv1alpha1.MCPToolSpec) *appsv1.Deployment {
-	// Assemble the full system prompt (fragments + MCP guidance) before hashing so that
-	// changes to referenced SwarmSettings or MCPToolSpec.instructions trigger rolling restarts.
-	assembledPrompt := assembleSystemPrompt(resolvedPrompt, allSettings, resolvedMCPServers)
+func (r *SwarmAgentReconciler) buildDeployment(in deploymentInput) *appsv1.Deployment {
+	swarmAgent := in.swarmAgent
+	allSettings := in.allSettings
+	swarmMemory := in.swarmMemory
+	assembledPrompt := in.assembledPrompt
+	apiKeyEnvVar := in.apiKeyEnvVar
+	apiKeyVersion := in.apiKeyVersion
+	resolvedMCPServers := in.resolvedMCPServers
+	effectivePolicy := in.effectivePolicy
 	promptHashBytes := sha256.Sum256([]byte(assembledPrompt))
 	promptHash := fmt.Sprintf("%x", promptHashBytes)
 	labels := map[string]string{
@@ -632,7 +795,7 @@ func (r *SwarmAgentReconciler) buildDeployment(swarmAgent *kubeswarmv1alpha1.Swa
 		replicas = *swarmAgent.Spec.Runtime.Replicas
 	}
 	// Budget enforcement: scale to 0 while the daily token limit is exceeded.
-	if apimeta.IsStatusConditionTrue(swarmAgent.Status.Conditions, "BudgetExceeded") {
+	if apimeta.IsStatusConditionTrue(swarmAgent.Status.Conditions, kubeswarmv1alpha1.ConditionBudgetExceeded) {
 		replicas = 0
 	}
 
@@ -650,13 +813,14 @@ func (r *SwarmAgentReconciler) buildDeployment(swarmAgent *kubeswarmv1alpha1.Swa
 					Labels: labels,
 					Annotations: map[string]string{
 						// Hash changes trigger automatic rolling restart when the prompt is updated.
-						"kubeswarm/system-prompt-hash": promptHash,
+						kubeswarmv1alpha1.AnnotationSystemPromptHash: promptHash,
 						// ResourceVersion of the referenced k8s Secret - triggers rolling restart on key rotation.
-						"kubeswarm/api-key-version": apiKeyVersion,
+						kubeswarmv1alpha1.AnnotationAPIKeyVersion: apiKeyVersion,
 					},
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: agentServiceAccount,
+					TerminationGracePeriodSeconds: in.swarmAgent.Spec.Runtime.DrainTimeoutSeconds,
+					ServiceAccountName:            agentServiceAccount,
 					// Pod-level security: enforce non-root user and RuntimeDefault seccomp
 					// profile. Matches the operator pod's own PodSecurityContext.
 					SecurityContext: &corev1.PodSecurityContext{
@@ -685,7 +849,7 @@ func (r *SwarmAgentReconciler) buildDeployment(swarmAgent *kubeswarmv1alpha1.Swa
 						// Resource limits - use spec.resources if set, otherwise inject safe defaults.
 						// Ephemeral storage limit is always added to prevent /tmp exhaustion.
 						Resources: agentResources(swarmAgent),
-						Env:       r.buildEnvVars(swarmAgent, allSettings, swarmMemory, apiKeyEnvVar, resolvedMCPServers),
+						Env:       r.buildEnvVars(swarmAgent, allSettings, swarmMemory, apiKeyEnvVar, resolvedMCPServers, effectivePolicy, in.gatewayCapabilities),
 						// Global fallback secret (set via Helm apiKeys.existingSecret).
 						// Per-agent spec.envFrom entries are appended after and take precedence.
 						EnvFrom: func() []corev1.EnvFromSource {
@@ -704,6 +868,17 @@ func (r *SwarmAgentReconciler) buildDeployment(swarmAgent *kubeswarmv1alpha1.Swa
 									Optional: new(true),
 								},
 							})
+							// Inject S3 credentials secret (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+							// when the team artifact store references one.
+							if credSecret := swarmAgent.Annotations[kubeswarmv1alpha1.AnnotationTeamArtifactCredentials]; credSecret != "" {
+								optional := true
+								base = append(base, corev1.EnvFromSource{
+									SecretRef: &corev1.SecretEnvSource{
+										LocalObjectReference: corev1.LocalObjectReference{Name: credSecret},
+										Optional:             &optional,
+									},
+								})
+							}
 							return base
 						}(),
 						// mTLS Secret volumes for MCP servers (RFC-0016 Phase 5).
@@ -713,7 +888,7 @@ func (r *SwarmAgentReconciler) buildDeployment(swarmAgent *kubeswarmv1alpha1.Swa
 							ProbeHandler: corev1.ProbeHandler{
 								HTTPGet: &corev1.HTTPGetAction{
 									Path: "/healthz",
-									Port: intstrFromInt32(8080),
+									Port: intstr.FromInt32(8080),
 								},
 							},
 							InitialDelaySeconds: 10,
@@ -723,7 +898,7 @@ func (r *SwarmAgentReconciler) buildDeployment(swarmAgent *kubeswarmv1alpha1.Swa
 							ProbeHandler: corev1.ProbeHandler{
 								HTTPGet: &corev1.HTTPGetAction{
 									Path: "/readyz",
-									Port: intstrFromInt32(8080),
+									Port: intstr.FromInt32(8080),
 								},
 							},
 							InitialDelaySeconds: 10,
@@ -969,27 +1144,12 @@ func buildEmbeddingEnvVars(emb *kubeswarmv1alpha1.EmbeddingConfig) []corev1.EnvV
 	}
 	provider := emb.Provider
 	if provider == "" || provider == "auto" {
-		provider = inferEmbeddingProvider(emb.Model)
+		provider = providers.DetectEmbedding(emb.Model)
 	}
 	if provider != "" {
 		envs = append(envs, corev1.EnvVar{Name: "AGENT_EMBEDDING_PROVIDER", Value: provider})
 	}
 	return envs
-}
-
-// inferEmbeddingProvider returns the provider name inferred from the embedding model ID.
-func inferEmbeddingProvider(model string) string {
-	switch {
-	case strings.HasPrefix(model, "text-embedding-"):
-		return "openai"
-	case strings.HasPrefix(model, "text-multilingual-embedding-") ||
-		strings.HasPrefix(model, "text-embedding-004"):
-		return "google"
-	case strings.HasPrefix(model, "voyage-"):
-		return "voyageai"
-	default:
-		return "openai" // OpenAI-compatible fallback (covers Ollama embedding models)
-	}
 }
 
 // mcpServerRuntime is the runtime representation of one MCP server injected into
@@ -1024,28 +1184,33 @@ func mcpTokenEnvVar(serverName string) string {
 	return "AGENT_MCP_TOKEN_" + strings.ToUpper(safe)
 }
 
-// mcpVolumeName returns the k8s volume name for an mTLS Secret mount for the given server.
-func mcpVolumeName(serverName string) string {
-	safe := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+// sanitizeMCPName normalizes a server name to a k8s-safe string.
+// allowed controls which characters are kept; everything else becomes replacement.
+func sanitizeMCPName(serverName string, allowed func(rune) bool, replacement rune) string {
+	return strings.Map(func(r rune) rune {
+		if allowed(r) {
 			return r
 		}
-		if r >= 'A' && r <= 'Z' {
-			return r + 32 // to lower
-		}
-		return '-'
+		return replacement
 	}, serverName)
-	return "mcp-mtls-" + safe
+}
+
+// mcpVolumeName returns the k8s volume name for an mTLS Secret mount for the given server.
+func mcpVolumeName(serverName string) string {
+	safe := sanitizeMCPName(serverName, func(r rune) bool {
+		if r >= 'A' && r <= 'Z' {
+			return false // lowered below
+		}
+		return (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-'
+	}, '-')
+	return "mcp-mtls-" + strings.ToLower(safe)
 }
 
 // mcpMountPath returns the pod-local directory for an mTLS Secret mount.
 func mcpMountPath(serverName string) string {
-	safe := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			return r
-		}
-		return '-'
-	}, serverName)
+	safe := sanitizeMCPName(serverName, func(r rune) bool {
+		return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
+	}, '-')
 	return "/var/secrets/mcp/" + safe
 }
 
@@ -1148,7 +1313,7 @@ func buildVolumes(swarmAgent *kubeswarmv1alpha1.SwarmAgent, servers []kubeswarmv
 		},
 	}
 	vols = append(vols, buildMCPVolumes(servers)...)
-	if claim, ok := swarmAgent.Annotations[annotationTeamArtifactClaim]; ok && claim != "" {
+	if claim, ok := swarmAgent.Annotations[kubeswarmv1alpha1.AnnotationTeamArtifactClaim]; ok && claim != "" {
 		vols = append(vols, corev1.Volume{
 			Name: artifactVolumeName,
 			VolumeSource: corev1.VolumeSource{
@@ -1171,8 +1336,8 @@ func buildVolumeMounts(swarmAgent *kubeswarmv1alpha1.SwarmAgent, servers []kubes
 		},
 	}
 	mounts = append(mounts, buildMCPVolumeMounts(servers)...)
-	if claim, ok := swarmAgent.Annotations[annotationTeamArtifactClaim]; ok && claim != "" {
-		mountPath := swarmAgent.Annotations[annotationTeamArtifactStore]
+	if claim, ok := swarmAgent.Annotations[kubeswarmv1alpha1.AnnotationTeamArtifactClaim]; ok && claim != "" {
+		mountPath := swarmAgent.Annotations[kubeswarmv1alpha1.AnnotationTeamArtifactStore]
 		// Extract the path from the file:// URL (strip scheme).
 		if after, found := strings.CutPrefix(mountPath, "file://"); found {
 			mountPath = after
@@ -1194,6 +1359,8 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 	swarmMemory *kubeswarmv1alpha1.SwarmMemory,
 	apiKeyEnvVar *corev1.EnvVar,
 	resolvedMCPServers []kubeswarmv1alpha1.MCPToolSpec,
+	effectivePolicy *kubeswarmv1alpha1.EffectivePolicySpec,
+	gatewayCapabilities []GatewayCapabilityEntry,
 ) []corev1.EnvVar {
 	mcpJSON, _ := json.Marshal(buildMCPRuntimeConfigs(resolvedMCPServers))
 
@@ -1214,6 +1381,11 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 		}
 		dailyTokenLimit = limits.DailyTokens
 	}
+
+	// Clamp against effective policy (RFC-0049 Phase 5).
+	maxTokens, timeoutSecs, maxRetries, dailyTokenLimit = applyPolicyLimits(
+		maxTokens, timeoutSecs, maxRetries, dailyTokenLimit, effectivePolicy,
+	)
 
 	envVars := []corev1.EnvVar{
 		{Name: "AGENT_MODEL", Value: swarmAgent.Spec.Model},
@@ -1240,16 +1412,7 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 		{Name: "AGENT_NAME", Value: swarmAgent.Name},
 	}
 
-	// Propagate the custom validator prompt when a semantic liveness probe is configured.
-	if swarmAgent.Spec.Observability != nil &&
-		swarmAgent.Spec.Observability.HealthCheck != nil &&
-		swarmAgent.Spec.Observability.HealthCheck.Type == "semantic" &&
-		swarmAgent.Spec.Observability.HealthCheck.Prompt != "" {
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  "AGENT_VALIDATOR_PROMPT",
-			Value: swarmAgent.Spec.Observability.HealthCheck.Prompt,
-		})
-	}
+	envVars = append(envVars, buildObservabilityEnvVars(swarmAgent)...)
 
 	// Inject env vars forwarded from the operator pod via SWARM_AGENT_INJECT_* prefix.
 	// These allow cluster-wide agent defaults (e.g. OPENAI_BASE_URL, AGENT_PROVIDER)
@@ -1282,37 +1445,10 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 	envVars = append(envVars, buildArtifactEnvVars(swarmAgent)...)
 	envVars = append(envVars, buildPluginEnvVars(swarmAgent)...)
 
-	// Inject reasoning configuration env vars (RFC-0033). Only set fields that
-	// are explicitly populated on the SwarmAgent; unset fields fall through to
-	// provider defaults.
-	if rc := mergeReasoningConfig(swarmAgent.Spec.Reasoning, allSettings); rc != nil {
-		if rc.Mode != "" {
-			envVars = append(envVars, corev1.EnvVar{Name: "AGENT_REASONING_MODE", Value: string(rc.Mode)})
-		}
-		if rc.Effort != "" {
-			envVars = append(envVars, corev1.EnvVar{Name: "AGENT_REASONING_EFFORT", Value: string(rc.Effort)})
-		}
-		if rc.BudgetTokens != nil {
-			envVars = append(envVars, corev1.EnvVar{
-				Name:  "AGENT_REASONING_BUDGET_TOKENS",
-				Value: strconv.FormatInt(int64(*rc.BudgetTokens), 10),
-			})
-		}
-	}
-	if g := swarmAgent.Spec.Guardrails; g != nil && g.Limits != nil {
-		if g.Limits.MaxThinkingTokensPerCall != nil {
-			envVars = append(envVars, corev1.EnvVar{
-				Name:  "AGENT_MAX_THINKING_TOKENS_PER_CALL",
-				Value: strconv.FormatInt(int64(*g.Limits.MaxThinkingTokensPerCall), 10),
-			})
-		}
-		if g.Limits.MaxAnswerTokensPerCall != nil {
-			envVars = append(envVars, corev1.EnvVar{
-				Name:  "AGENT_MAX_ANSWER_TOKENS_PER_CALL",
-				Value: strconv.FormatInt(int64(*g.Limits.MaxAnswerTokensPerCall), 10),
-			})
-		}
-	}
+	envVars = append(envVars, buildReasoningEnvVars(swarmAgent, allSettings, effectivePolicy)...)
+
+	// Inject policy-specific env vars (tool deny, trust level, deny patterns).
+	envVars = append(envVars, buildPolicyEnvVars(effectivePolicy)...)
 
 	// Inject LoopPolicy as JSON (RFC-0026). Only set when the field is non-nil.
 	if swarmAgent.Spec.Runtime.Loop != nil {
@@ -1334,6 +1470,14 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 		})
 	}
 
+	envVars = append(envVars, buildCircuitBreakerEnvVars(swarmAgent)...)
+
+	// Inject advisor connection configs as JSON (RFC-0048).
+	envVars = append(envVars, buildAdvisorEnvVars(swarmAgent)...)
+
+	// Inject gateway configuration (RFC-0052).
+	envVars = append(envVars, buildGatewayEnvVars(swarmAgent, gatewayCapabilities)...)
+
 	// Deduplicate: last occurrence wins. This prevents warnings when
 	// SWARM_AGENT_INJECT_TASK_QUEUE_URL and the team annotation both set TASK_QUEUE_URL.
 	seen := make(map[string]int, len(envVars))
@@ -1349,19 +1493,132 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 	return out
 }
 
+// buildObservabilityEnvVars returns env vars for health check and logging configuration.
+func buildObservabilityEnvVars(swarmAgent *kubeswarmv1alpha1.SwarmAgent) []corev1.EnvVar {
+	if swarmAgent.Spec.Observability == nil {
+		return nil
+	}
+	var out []corev1.EnvVar
+
+	if hc := swarmAgent.Spec.Observability.HealthCheck; hc != nil &&
+		hc.Type == kubeswarmv1alpha1.HealthCheckSemantic && hc.Prompt != "" {
+		out = append(out, corev1.EnvVar{Name: "AGENT_VALIDATOR_PROMPT", Value: hc.Prompt})
+	}
+
+	if logging := swarmAgent.Spec.Observability.Logging; logging != nil {
+		if logging.Level != "" {
+			out = append(out, corev1.EnvVar{Name: "AGENT_LOG_LEVEL", Value: string(logging.Level)})
+		}
+		if logging.ToolCalls {
+			out = append(out, corev1.EnvVar{Name: "AGENT_LOG_TOOL_CALLS", Value: "true"})
+		}
+		if logging.LLMTurns {
+			out = append(out, corev1.EnvVar{Name: "AGENT_LOG_LLM_TURNS", Value: "true"})
+		}
+		if logging.Redaction != nil {
+			if logging.Redaction.Secrets {
+				out = append(out, corev1.EnvVar{Name: "AGENT_LOG_REDACT_SECRETS", Value: "true"})
+			}
+			if logging.Redaction.PII {
+				out = append(out, corev1.EnvVar{Name: "AGENT_LOG_REDACT_PII", Value: "true"})
+			}
+		}
+	}
+	return out
+}
+
+// buildReasoningEnvVars returns env vars for reasoning configuration (RFC-0033)
+// and thinking/answer token guardrail limits.
+func buildReasoningEnvVars(
+	swarmAgent *kubeswarmv1alpha1.SwarmAgent,
+	allSettings []kubeswarmv1alpha1.SwarmSettings,
+	effectivePolicy *kubeswarmv1alpha1.EffectivePolicySpec,
+) []corev1.EnvVar {
+	var out []corev1.EnvVar
+
+	if rc := mergeReasoningConfig(swarmAgent.Spec.Reasoning, allSettings); rc != nil {
+		if rc.Mode != "" {
+			out = append(out, corev1.EnvVar{Name: "AGENT_REASONING_MODE", Value: string(rc.Mode)})
+		}
+		if rc.Effort != "" {
+			out = append(out, corev1.EnvVar{Name: "AGENT_REASONING_EFFORT", Value: string(rc.Effort)})
+		}
+		if rc.BudgetTokens != nil {
+			out = append(out, corev1.EnvVar{
+				Name:  "AGENT_REASONING_BUDGET_TOKENS",
+				Value: strconv.FormatInt(int64(*rc.BudgetTokens), 10),
+			})
+		}
+	}
+
+	var thinkingTokens, answerTokens *int32
+	if g := swarmAgent.Spec.Guardrails; g != nil && g.Limits != nil {
+		thinkingTokens = g.Limits.MaxThinkingTokensPerCall
+		answerTokens = g.Limits.MaxAnswerTokensPerCall
+	}
+	thinkingTokens, answerTokens = applyPolicyThinkingLimits(thinkingTokens, answerTokens, effectivePolicy)
+	if thinkingTokens != nil {
+		out = append(out, corev1.EnvVar{
+			Name:  "AGENT_MAX_THINKING_TOKENS_PER_CALL",
+			Value: strconv.FormatInt(int64(*thinkingTokens), 10),
+		})
+	}
+	if answerTokens != nil {
+		out = append(out, corev1.EnvVar{
+			Name:  "AGENT_MAX_ANSWER_TOKENS_PER_CALL",
+			Value: strconv.FormatInt(int64(*answerTokens), 10),
+		})
+	}
+	return out
+}
+
+// buildCircuitBreakerEnvVars returns the AGENT_CIRCUIT_BREAKER env var when configured.
+func buildCircuitBreakerEnvVars(swarmAgent *kubeswarmv1alpha1.SwarmAgent) []corev1.EnvVar {
+	if swarmAgent.Spec.Guardrails == nil || swarmAgent.Spec.Guardrails.Limits == nil ||
+		swarmAgent.Spec.Guardrails.Limits.CircuitBreaker == nil {
+		return nil
+	}
+	cb := swarmAgent.Spec.Guardrails.Limits.CircuitBreaker
+	cbJSON, _ := json.Marshal(map[string]int{
+		"failureThreshold": cb.FailureThreshold,
+		"cooldownSeconds":  cb.CooldownSeconds,
+		"halfOpenMaxCalls": cb.HalfOpenMaxCalls,
+	})
+	return []corev1.EnvVar{{Name: "AGENT_CIRCUIT_BREAKER", Value: string(cbJSON)}}
+}
+
 // buildTeamEnvVars returns env vars derived from SwarmTeam annotations/labels.
+// For standalone agents (no team annotation), it builds a per-agent stream key
+// so that each agent polls its own Redis stream instead of the shared default.
 func buildTeamEnvVars(swarmAgent *kubeswarmv1alpha1.SwarmAgent) []corev1.EnvVar {
 	var out []corev1.EnvVar
-	if queueURL, ok := swarmAgent.Annotations[annotationTeamQueueURL]; ok && queueURL != "" {
+	if queueURL, ok := swarmAgent.Annotations[kubeswarmv1alpha1.AnnotationTeamQueueURL]; ok && queueURL != "" {
 		out = append(out, corev1.EnvVar{Name: "TASK_QUEUE_URL", Value: queueURL})
+	} else {
+		// Standalone agent: derive a per-agent stream key from the injected
+		// base URL so agents don't share the default "agent-tasks" stream.
+		// The actual base URL comes from SWARM_AGENT_INJECT_TASK_QUEUE_URL
+		// which is appended earlier; here we set only the stream-qualified
+		// override that will win during deduplication (last occurrence wins).
+		baseURL := os.Getenv("SWARM_AGENT_INJECT_TASK_QUEUE_URL")
+		if baseURL == "" {
+			baseURL = os.Getenv("TASK_QUEUE_URL")
+		}
+		if baseURL != "" {
+			streamKey := swarmAgent.Namespace + "." + swarmAgent.Name
+			out = append(out, corev1.EnvVar{
+				Name:  "TASK_QUEUE_URL",
+				Value: appendStreamParam(baseURL, streamKey),
+			})
+		}
 	}
-	if routes, ok := swarmAgent.Annotations[annotationTeamRoutes]; ok && routes != "" {
+	if routes, ok := swarmAgent.Annotations[kubeswarmv1alpha1.AnnotationTeamRoutes]; ok && routes != "" {
 		out = append(out, corev1.EnvVar{Name: "AGENT_TEAM_ROUTES", Value: routes})
 	}
-	if role, ok := swarmAgent.Annotations[annotationTeamRole]; ok && role != "" {
+	if role, ok := swarmAgent.Annotations[kubeswarmv1alpha1.AnnotationTeamRole]; ok && role != "" {
 		out = append(out, corev1.EnvVar{Name: "AGENT_TEAM_ROLE", Value: role})
 	}
-	if teamName, ok := swarmAgent.Labels["kubeswarm/team"]; ok && teamName != "" {
+	if teamName, ok := swarmAgent.Labels[kubeswarmv1alpha1.LabelTeam]; ok && teamName != "" {
 		out = append(out, corev1.EnvVar{Name: "AGENT_TEAM_NAME", Value: teamName})
 	}
 	return out
@@ -1369,7 +1626,7 @@ func buildTeamEnvVars(swarmAgent *kubeswarmv1alpha1.SwarmAgent) []corev1.EnvVar 
 
 // buildArtifactEnvVars returns env vars for the artifact store (RFC-0013).
 func buildArtifactEnvVars(swarmAgent *kubeswarmv1alpha1.SwarmAgent) []corev1.EnvVar {
-	storeURL, ok := swarmAgent.Annotations[annotationTeamArtifactStore]
+	storeURL, ok := swarmAgent.Annotations[kubeswarmv1alpha1.AnnotationTeamArtifactStore]
 	if !ok || storeURL == "" {
 		return nil
 	}
@@ -1380,6 +1637,17 @@ func buildArtifactEnvVars(swarmAgent *kubeswarmv1alpha1.SwarmAgent) []corev1.Env
 		artifactDir = after
 	}
 	out = append(out, corev1.EnvVar{Name: "AGENT_ARTIFACT_DIR", Value: artifactDir})
+
+	// Inject save-output config when spec.runtime.artifacts is set.
+	if swarmAgent.Spec.Runtime.Artifacts != nil && swarmAgent.Spec.Runtime.Artifacts.SaveOutput {
+		out = append(out, corev1.EnvVar{Name: "AGENT_ARTIFACT_SAVE_OUTPUT", Value: "true"})
+		format := swarmAgent.Spec.Runtime.Artifacts.Format
+		if format == "" {
+			format = "text"
+		}
+		out = append(out, corev1.EnvVar{Name: "AGENT_ARTIFACT_SAVE_FORMAT", Value: string(format)})
+	}
+
 	return out
 }
 
@@ -1404,9 +1672,14 @@ func buildPluginEnvVars(swarmAgent *kubeswarmv1alpha1.SwarmAgent) []corev1.EnvVa
 // so users know it was auto-created. Users may edit its spec freely; the operator will
 // not overwrite their changes.
 func (r *SwarmAgentReconciler) ensureDefaultRegistry(ctx context.Context, namespace string) error {
+	// Fast path: skip the Get when we've already confirmed the registry exists.
+	if _, ok := r.registryEnsured.Load(namespace); ok {
+		return nil
+	}
 	reg := &kubeswarmv1alpha1.SwarmRegistry{}
 	err := r.Get(ctx, client.ObjectKey{Name: "default", Namespace: namespace}, reg)
 	if err == nil {
+		r.registryEnsured.Store(namespace, struct{}{})
 		return nil // already exists
 	}
 	if !errors.IsNotFound(err) {
@@ -1417,7 +1690,7 @@ func (r *SwarmAgentReconciler) ensureDefaultRegistry(ctx context.Context, namesp
 			Name:      "default",
 			Namespace: namespace,
 			Annotations: map[string]string{
-				"kubeswarm/managed": "true",
+				kubeswarmv1alpha1.AnnotationManaged: "true",
 			},
 		},
 		Spec: kubeswarmv1alpha1.SwarmRegistrySpec{
@@ -1427,6 +1700,7 @@ func (r *SwarmAgentReconciler) ensureDefaultRegistry(ctx context.Context, namesp
 	if err := r.Create(ctx, defaultReg); err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("creating default SwarmRegistry: %w", err)
 	}
+	r.registryEnsured.Store(namespace, struct{}{})
 	return nil
 }
 
@@ -1435,18 +1709,18 @@ func (r *SwarmAgentReconciler) ensureDefaultRegistry(ctx context.Context, namesp
 // the agent starts regardless. Agents with registryRef == nil have opted out; no check.
 func (r *SwarmAgentReconciler) reconcileRegistryRef(ctx context.Context, agent *kubeswarmv1alpha1.SwarmAgent) {
 	if agent.Spec.Infrastructure == nil || agent.Spec.Infrastructure.RegistryRef == nil {
-		apimeta.RemoveStatusCondition(&agent.Status.Conditions, "RegistryNotFound")
+		apimeta.RemoveStatusCondition(&agent.Status.Conditions, kubeswarmv1alpha1.ConditionRegistryNotFound)
 		return
 	}
 	reg := &kubeswarmv1alpha1.SwarmRegistry{}
 	err := r.Get(ctx, client.ObjectKey{Name: agent.Spec.Infrastructure.RegistryRef.Name, Namespace: agent.Namespace}, reg)
 	if errors.IsNotFound(err) {
-		r.setCondition(agent, "RegistryNotFound", metav1.ConditionTrue, "RegistryNotFound",
+		r.setCondition(agent, kubeswarmv1alpha1.ConditionRegistryNotFound, metav1.ConditionTrue, kubeswarmv1alpha1.ConditionRegistryNotFound,
 			fmt.Sprintf("SwarmRegistry %q not found in namespace %q; agent will not be indexed",
 				agent.Spec.Infrastructure.RegistryRef.Name, agent.Namespace))
 		return
 	}
-	apimeta.RemoveStatusCondition(&agent.Status.Conditions, "RegistryNotFound")
+	apimeta.RemoveStatusCondition(&agent.Status.Conditions, kubeswarmv1alpha1.ConditionRegistryNotFound)
 }
 
 // reconcileBudgetRef checks the SwarmBudget referenced by spec.guardrails.budgetRef.
@@ -1468,7 +1742,7 @@ func (r *SwarmAgentReconciler) reconcileBudgetRef(ctx context.Context, agent *ku
 		return fmt.Errorf("fetching SwarmBudget %q: %w", agent.Spec.Guardrails.BudgetRef.Name, err)
 	}
 	if budget.Spec.HardStop && budget.Status.Phase == kubeswarmv1alpha1.BudgetStatusExceeded {
-		r.setCondition(agent, "BudgetExceeded", metav1.ConditionTrue, "BudgetRefExceeded",
+		r.setCondition(agent, kubeswarmv1alpha1.ConditionBudgetExceeded, metav1.ConditionTrue, "BudgetRefExceeded",
 			fmt.Sprintf("SwarmBudget %q is exceeded (%s/%s %s); replicas scaled to 0",
 				budget.Name, budget.Status.SpentUSD, budget.Spec.Limit, budget.Spec.Currency))
 	}
@@ -1492,7 +1766,11 @@ func (r *SwarmAgentReconciler) reconcileDailyBudget(
 	windowStart := now.Add(-24 * time.Hour)
 
 	runs := &kubeswarmv1alpha1.SwarmRunList{}
-	if err := r.List(ctx, runs, client.InNamespace(dep.Namespace)); err != nil {
+	listOpts := []client.ListOption{client.InNamespace(dep.Namespace)}
+	if teamName, ok := dep.Labels[kubeswarmv1alpha1.LabelTeam]; ok && teamName != "" {
+		listOpts = append(listOpts, client.MatchingLabels{kubeswarmv1alpha1.LabelTeam: teamName})
+	}
+	if err := r.List(ctx, runs, listOpts...); err != nil {
 		return 0, fmt.Errorf("listing runs for budget: %w", err)
 	}
 
@@ -1506,11 +1784,7 @@ func (r *SwarmAgentReconciler) reconcileDailyBudget(
 		// Build role → agentName map from the run's role snapshot (static team roles).
 		roleAgent := make(map[string]string, len(run.Spec.Roles))
 		for _, role := range run.Spec.Roles {
-			agentName := role.SwarmAgent
-			if agentName == "" {
-				agentName = run.Spec.TeamRef + "-" + role.Name
-			}
-			roleAgent[role.Name] = agentName
+			roleAgent[role.Name] = resolveRoleAgentName(run.Spec.TeamRef, role)
 		}
 		for _, st := range run.Status.Steps {
 			// Match via registry-resolved agent name first, then static role map.
@@ -1546,13 +1820,17 @@ func (r *SwarmAgentReconciler) reconcileDailyBudget(
 
 	// Budget enforcement only applies when a limit is configured.
 	if limit <= 0 {
-		apimeta.RemoveStatusCondition(&dep.Status.Conditions, "BudgetExceeded")
+		apimeta.RemoveStatusCondition(&dep.Status.Conditions, kubeswarmv1alpha1.ConditionBudgetExceeded)
 		return 0, nil
 	}
 
 	if usage.TotalTokens >= limit {
-		r.setCondition(dep, "BudgetExceeded", metav1.ConditionTrue, "DailyLimitReached",
+		r.setCondition(dep, kubeswarmv1alpha1.ConditionBudgetExceeded, metav1.ConditionTrue, "DailyLimitReached",
 			fmt.Sprintf("daily token usage %d exceeds limit %d; replicas scaled to 0", usage.TotalTokens, limit))
+		// Dispatch DailyLimitReached notification.
+		if r.NotifyDispatcher != nil {
+			r.NotifyDispatcher.DispatchDailyLimitReached(context.Background(), dep)
+		}
 		// Requeue when the oldest entry leaves the window so we can restore replicas.
 		if earliestInWindow != nil {
 			ttl := earliestInWindow.Add(24 * time.Hour).Sub(now)
@@ -1562,7 +1840,7 @@ func (r *SwarmAgentReconciler) reconcileDailyBudget(
 	}
 
 	// Under limit - clear condition.
-	apimeta.RemoveStatusCondition(&dep.Status.Conditions, "BudgetExceeded")
+	apimeta.RemoveStatusCondition(&dep.Status.Conditions, kubeswarmv1alpha1.ConditionBudgetExceeded)
 	return 0, nil
 }
 
@@ -1584,71 +1862,127 @@ const mcpHealthRequeueInterval = 60 * time.Second
 // Probe failures are non-blocking: they update status but do not prevent the rest of
 // the reconcile loop from completing.
 func (r *SwarmAgentReconciler) reconcileMCPHealth(
-	ctx context.Context,
 	agent *kubeswarmv1alpha1.SwarmAgent,
 	resolvedMCPServers []kubeswarmv1alpha1.MCPToolSpec,
-) (time.Duration, error) {
+) time.Duration {
 	if len(resolvedMCPServers) == 0 {
-		apimeta.RemoveStatusCondition(&agent.Status.Conditions, "MCPDegraded")
+		apimeta.RemoveStatusCondition(&agent.Status.Conditions, kubeswarmv1alpha1.ConditionMCPDegraded)
 		agent.Status.ToolConnections = nil
-		return 0, nil
+		return 0
 	}
 
-	boolPtr := func(v bool) *bool { return &v }
 	now := metav1.Now()
-	statuses := make([]kubeswarmv1alpha1.SwarmAgentMCPStatus, 0, len(resolvedMCPServers))
+	statuses := make([]kubeswarmv1alpha1.SwarmAgentMCPStatus, len(resolvedMCPServers))
 	allHealthy := true
 
-	for _, server := range resolvedMCPServers {
-		s := kubeswarmv1alpha1.SwarmAgentMCPStatus{
-			Name:      server.Name,
-			URL:       server.URL,
-			LastCheck: &now,
-		}
-
-		u, err := neturl.Parse(server.URL)
-		if err != nil {
-			s.Healthy = boolPtr(false)
-			s.Message = fmt.Sprintf("invalid URL: %v", err)
-			allHealthy = false
-		} else {
-			host := u.Host
-			if !strings.Contains(host, ":") {
-				if u.Scheme == "https" {
-					host += ":443"
+	// Fan out TCP dials concurrently - each dial blocks for up to mcpHealthDialTimeout.
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for i, server := range resolvedMCPServers {
+		wg.Add(1)
+		go func(idx int, srv kubeswarmv1alpha1.MCPToolSpec) {
+			defer wg.Done()
+			s := kubeswarmv1alpha1.SwarmAgentMCPStatus{
+				Name:      srv.Name,
+				URL:       srv.URL,
+				LastCheck: &now,
+				AuthType:  mcpAuthType(srv),
+				Trust:     effectiveTrust(srv.Trust, agent),
+			}
+			u, err := neturl.Parse(srv.URL)
+			if err != nil {
+				s.Healthy = new(false)
+				s.Message = fmt.Sprintf("invalid URL: %v", err)
+				mu.Lock()
+				allHealthy = false
+				mu.Unlock()
+			} else {
+				host := u.Host
+				if !strings.Contains(host, ":") {
+					if u.Scheme == "https" {
+						host += ":443"
+					} else {
+						host += ":80"
+					}
+				}
+				conn, dialErr := net.DialTimeout("tcp", host, mcpHealthDialTimeout)
+				if dialErr != nil {
+					s.Healthy = new(false)
+					s.Message = dialErr.Error()
+					mu.Lock()
+					allHealthy = false
+					mu.Unlock()
 				} else {
-					host += ":80"
+					_ = conn.Close()
+					s.Healthy = new(true)
 				}
 			}
-			conn, err := net.DialTimeout("tcp", host, mcpHealthDialTimeout)
-			if err != nil {
-				s.Healthy = boolPtr(false)
-				s.Message = err.Error()
-				allHealthy = false
-			} else {
-				_ = conn.Close()
-				s.Healthy = boolPtr(true)
-			}
-		}
-		statuses = append(statuses, s)
+			statuses[idx] = s
+		}(i, server)
 	}
+	wg.Wait()
 
 	agent.Status.ToolConnections = statuses
 
 	if allHealthy {
-		apimeta.RemoveStatusCondition(&agent.Status.Conditions, "MCPDegraded")
+		apimeta.RemoveStatusCondition(&agent.Status.Conditions, kubeswarmv1alpha1.ConditionMCPDegraded)
 	} else {
-		r.setCondition(agent, "MCPDegraded", metav1.ConditionTrue, "MCPUnreachable",
+		r.setCondition(agent, kubeswarmv1alpha1.ConditionMCPDegraded, metav1.ConditionTrue, "MCPUnreachable",
 			"one or more MCP servers are unreachable; see status.toolConnections for details")
+		// Dispatch AgentDegraded notification when the agent has a notifyRef.
+		if r.NotifyDispatcher != nil {
+			r.NotifyDispatcher.DispatchAgentDegraded(context.Background(), agent)
+		}
 	}
 
-	// Status is updated by syncStatus which runs before this call; call Update here
-	// to persist MCP health results independently.
-	if err := r.Status().Update(ctx, agent); err != nil {
-		return 0, err
-	}
+	return mcpHealthRequeueInterval
+}
 
-	return mcpHealthRequeueInterval, nil
+// mcpAuthType returns the auth type string for a given MCP server spec.
+func mcpAuthType(srv kubeswarmv1alpha1.MCPToolSpec) string {
+	if srv.Auth == nil {
+		return "none"
+	}
+	if srv.Auth.Bearer != nil {
+		return mcpAuthBearer
+	}
+	if srv.Auth.MTLS != nil {
+		return mcpAuthMTLS
+	}
+	return "none"
+}
+
+// reconcileToolAgentConnections checks all tool-role agent connections and
+// returns their status. This mirrors reconcileAdvisorConnections but for
+// role=tool entries in spec.agents.
+func reconcileToolAgentConnections(
+	ctx context.Context,
+	c client.Client,
+	agent *kubeswarmv1alpha1.SwarmAgent,
+) []kubeswarmv1alpha1.ToolAgentConnectionStatus {
+	var statuses []kubeswarmv1alpha1.ToolAgentConnectionStatus
+	now := metav1.Now()
+	for _, conn := range agent.Spec.Agents {
+		if conn.Role != kubeswarmv1alpha1.AgentConnectionRoleTool {
+			continue
+		}
+		s := kubeswarmv1alpha1.ToolAgentConnectionStatus{
+			Name:               conn.Name,
+			Trust:              effectiveTrust(conn.Trust, agent),
+			LastTransitionTime: now,
+		}
+		if conn.AgentRef != nil {
+			target := &kubeswarmv1alpha1.SwarmAgent{}
+			if err := c.Get(ctx, client.ObjectKey{
+				Name:      conn.AgentRef.Name,
+				Namespace: agent.Namespace,
+			}, target); err == nil {
+				s.Ready = target.Status.ReadyReplicas > 0
+			}
+		}
+		statuses = append(statuses, s)
+	}
+	return statuses
 }
 
 // runToAgents maps a changed SwarmRun to all SwarmAgents referenced by its roles,
@@ -1660,11 +1994,21 @@ func (r *SwarmAgentReconciler) runToAgents(ctx context.Context, obj client.Objec
 	}
 	seen := make(map[string]struct{})
 	var reqs []reconcile.Request
+
+	// Standalone agent runs: map directly to the named agent.
+	if run.Spec.Agent != "" {
+		seen[run.Spec.Agent] = struct{}{}
+		reqs = append(reqs, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      run.Spec.Agent,
+				Namespace: run.Namespace,
+			},
+		})
+	}
+
+	// Team runs: map via roles.
 	for _, role := range run.Spec.Roles {
-		agentName := role.SwarmAgent
-		if agentName == "" {
-			agentName = run.Spec.TeamRef + "-" + role.Name
-		}
+		agentName := resolveRoleAgentName(run.Spec.TeamRef, role)
 		if _, dup := seen[agentName]; dup {
 			continue
 		}
@@ -1799,19 +2143,17 @@ func (r *SwarmAgentReconciler) configMapToAgents(ctx context.Context, obj client
 		return nil
 	}
 	agents := &kubeswarmv1alpha1.SwarmAgentList{}
-	if err := r.List(ctx, agents, client.InNamespace(cm.Namespace)); err != nil {
+	if err := r.List(ctx, agents,
+		client.InNamespace(cm.Namespace),
+		client.MatchingFields{agentPromptConfigMapIndex: cm.Name},
+	); err != nil {
 		return nil
 	}
-	var reqs []reconcile.Request
+	reqs := make([]reconcile.Request, 0, len(agents.Items))
 	for _, dep := range agents.Items {
-		if dep.Spec.Prompt == nil || dep.Spec.Prompt.From == nil || dep.Spec.Prompt.From.ConfigMapKeyRef == nil {
-			continue
-		}
-		if dep.Spec.Prompt.From.ConfigMapKeyRef.Name == cm.Name {
-			reqs = append(reqs, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: dep.Name, Namespace: dep.Namespace},
-			})
-		}
+		reqs = append(reqs, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: dep.Name, Namespace: dep.Namespace},
+		})
 	}
 	return reqs
 }
@@ -1824,19 +2166,17 @@ func (r *SwarmAgentReconciler) secretToAgents(ctx context.Context, obj client.Ob
 		return nil
 	}
 	agents := &kubeswarmv1alpha1.SwarmAgentList{}
-	if err := r.List(ctx, agents, client.InNamespace(sec.Namespace)); err != nil {
+	if err := r.List(ctx, agents,
+		client.InNamespace(sec.Namespace),
+		client.MatchingFields{agentPromptSecretIndex: sec.Name},
+	); err != nil {
 		return nil
 	}
-	var reqs []reconcile.Request
+	reqs := make([]reconcile.Request, 0, len(agents.Items))
 	for _, dep := range agents.Items {
-		if dep.Spec.Prompt == nil || dep.Spec.Prompt.From == nil || dep.Spec.Prompt.From.SecretKeyRef == nil {
-			continue
-		}
-		if dep.Spec.Prompt.From.SecretKeyRef.Name == sec.Name {
-			reqs = append(reqs, reconcile.Request{
-				NamespacedName: types.NamespacedName{Name: dep.Name, Namespace: dep.Namespace},
-			})
-		}
+		reqs = append(reqs, reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: dep.Name, Namespace: dep.Namespace},
+		})
 	}
 	return reqs
 }
@@ -1849,6 +2189,11 @@ func (r *SwarmAgentReconciler) reconcileAgentServiceAccount(
 	swarmAgent *kubeswarmv1alpha1.SwarmAgent,
 ) error {
 	ns := swarmAgent.Namespace
+
+	// Fast path: skip the 3 Gets when we've already confirmed all resources exist.
+	if _, ok := r.saEnsured.Load(ns); ok {
+		return nil
+	}
 
 	// ServiceAccount.
 	sa := &corev1.ServiceAccount{
@@ -1904,22 +2249,8 @@ func (r *SwarmAgentReconciler) reconcileAgentServiceAccount(
 		return fmt.Errorf("getting agent RoleBinding: %w", err)
 	}
 
+	r.saEnsured.Store(ns, struct{}{})
 	return nil
-}
-
-func (r *SwarmAgentReconciler) setCondition(
-	swarmAgent *kubeswarmv1alpha1.SwarmAgent,
-	condType string,
-	status metav1.ConditionStatus,
-	reason, message string,
-) {
-	apimeta.SetStatusCondition(&swarmAgent.Status.Conditions, metav1.Condition{
-		Type:               condType,
-		Status:             status,
-		ObservedGeneration: swarmAgent.Generation,
-		Reason:             reason,
-		Message:            message,
-	})
 }
 
 // resolveAPIKeyEnvVar returns the corev1.EnvVar to inject for the API key and the
@@ -2009,8 +2340,35 @@ func (r *SwarmAgentReconciler) settingsToAgents(ctx context.Context, obj client.
 	return reqs
 }
 
+const (
+	agentPromptConfigMapIndex = ".spec.prompt.from.configMapKeyRef.name"
+	agentPromptSecretIndex    = ".spec.prompt.from.secretKeyRef.name" //nolint:gosec // field index path, not a credential
+)
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SwarmAgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	ctx := context.Background()
+	indexer := mgr.GetFieldIndexer()
+
+	if err := indexer.IndexField(ctx, &kubeswarmv1alpha1.SwarmAgent{}, agentPromptConfigMapIndex, func(obj client.Object) []string {
+		agent := obj.(*kubeswarmv1alpha1.SwarmAgent)
+		if agent.Spec.Prompt != nil && agent.Spec.Prompt.From != nil && agent.Spec.Prompt.From.ConfigMapKeyRef != nil {
+			return []string{agent.Spec.Prompt.From.ConfigMapKeyRef.Name}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err := indexer.IndexField(ctx, &kubeswarmv1alpha1.SwarmAgent{}, agentPromptSecretIndex, func(obj client.Object) []string {
+		agent := obj.(*kubeswarmv1alpha1.SwarmAgent)
+		if agent.Spec.Prompt != nil && agent.Spec.Prompt.From != nil && agent.Spec.Prompt.From.SecretKeyRef != nil {
+			return []string{agent.Spec.Prompt.From.SecretKeyRef.Name}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kubeswarmv1alpha1.SwarmAgent{}).
 		Owns(&appsv1.Deployment{}).
@@ -2034,40 +2392,132 @@ func (r *SwarmAgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&kubeswarmv1alpha1.SwarmSettings{},
 			handler.EnqueueRequestsFromMapFunc(r.settingsToAgents),
 		).
+		// Re-evaluate gateway capabilities when any agent changes readiness
+		// (new capability agents becoming ready, agents being deleted, etc.).
+		Watches(
+			&kubeswarmv1alpha1.SwarmAgent{},
+			handler.EnqueueRequestsFromMapFunc(r.agentToGateways),
+		).
 		Named("swarmagent").
 		Complete(WithMetrics(r, "swarmagent"))
+}
+
+// agentToGateways maps a changed SwarmAgent to all gateway agents in the same
+// namespace so they re-evaluate their capability list when agents become ready,
+// gain capabilities, or are deleted.
+func (r *SwarmAgentReconciler) agentToGateways(ctx context.Context, obj client.Object) []reconcile.Request {
+	agent, ok := obj.(*kubeswarmv1alpha1.SwarmAgent)
+	if !ok {
+		return nil
+	}
+	// Don't re-enqueue gateway agents for their own changes (avoid infinite loop).
+	if agent.Spec.Gateway != nil {
+		return nil
+	}
+	// Only react when the agent has capabilities (potential gateway targets).
+	if len(agent.Spec.Capabilities) == 0 {
+		return nil
+	}
+
+	var agents kubeswarmv1alpha1.SwarmAgentList
+	if err := r.List(ctx, &agents, client.InNamespace(agent.Namespace)); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for _, a := range agents.Items {
+		if a.Spec.Gateway != nil {
+			reqs = append(reqs, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      a.Name,
+					Namespace: a.Namespace,
+				},
+			})
+		}
+	}
+	return reqs
 }
 
 // agentInjectEnvVars reads env vars prefixed with SWARM_AGENT_INJECT_ from the
 // operator pod's environment and returns them as agent pod env vars (prefix stripped).
 // This lets helm values.agentExtraEnv propagate cluster-wide defaults to every agent
 // pod without requiring a per-namespace secret (e.g. OPENAI_BASE_URL, AGENT_PROVIDER).
+// Cached at first call since the operator's environment is static after startup.
 func agentInjectEnvVars() []corev1.EnvVar {
-	const prefix = "SWARM_AGENT_INJECT_"
-	var vars []corev1.EnvVar
-	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, prefix) {
-			continue
+	agentInjectOnce.Do(func() {
+		const prefix = "SWARM_AGENT_INJECT_"
+		for _, kv := range os.Environ() {
+			if !strings.HasPrefix(kv, prefix) {
+				continue
+			}
+			idx := strings.IndexByte(kv, '=')
+			if idx < 0 {
+				continue
+			}
+			agentInjectCache = append(agentInjectCache, corev1.EnvVar{
+				Name:  kv[len(prefix):idx],
+				Value: kv[idx+1:],
+			})
 		}
-		idx := strings.IndexByte(kv, '=')
-		if idx < 0 {
-			continue
+	})
+	return agentInjectCache
+}
+
+var (
+	agentInjectOnce  sync.Once
+	agentInjectCache []corev1.EnvVar
+)
+
+// clusterAuditConfig holds the static cluster-level audit configuration read from
+// operator env vars at startup. Cached with sync.Once since the operator's
+// environment is static after startup.
+type clusterAuditConfig struct {
+	mode           string
+	sink           string
+	maxDetailBytes int
+	redisURL       string
+	maxStreamLen   int64
+	webhookURL     string
+	redact         []string
+}
+
+var (
+	clusterAuditOnce   sync.Once
+	clusterAuditCached clusterAuditConfig
+)
+
+func getClusterAuditConfig() clusterAuditConfig {
+	clusterAuditOnce.Do(func() {
+		clusterAuditCached.mode = os.Getenv("AUDIT_LOG_MODE")
+		clusterAuditCached.sink = os.Getenv("AUDIT_LOG_SINK")
+		if clusterAuditCached.sink == "" {
+			clusterAuditCached.sink = "stdout"
 		}
-		vars = append(vars, corev1.EnvVar{
-			Name:  kv[len(prefix):idx],
-			Value: kv[idx+1:],
-		})
-	}
-	return vars
+		if v := os.Getenv("AUDIT_LOG_MAX_DETAIL_BYTES"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				clusterAuditCached.maxDetailBytes = n
+			}
+		}
+		clusterAuditCached.redisURL = os.Getenv("AUDIT_LOG_REDIS_URL")
+		clusterAuditCached.webhookURL = os.Getenv("AUDIT_LOG_WEBHOOK_URL")
+		if v := os.Getenv("AUDIT_LOG_MAX_STREAM_LEN"); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+				clusterAuditCached.maxStreamLen = n
+			}
+		}
+		if v := os.Getenv("AUDIT_LOG_REDACT"); v != "" {
+			_ = json.Unmarshal([]byte(v), &clusterAuditCached.redact)
+		}
+	})
+	return clusterAuditCached
 }
 
 // buildAuditLogEnvVar builds the AGENT_AUDIT_LOG JSON value from the operator's
-// own audit config (set by Helm via AUDIT_LOG_* env vars) merged with any
-// agent-level spec.observability.auditLog override.
+// cached cluster config merged with any agent-level spec.observability.auditLog override.
 func buildAuditLogEnvVar(agent *kubeswarmv1alpha1.SwarmAgent) string {
-	// Read cluster-level defaults from operator env vars (set by Helm).
-	mode := os.Getenv("AUDIT_LOG_MODE")
-	if mode == "" || mode == "off" {
+	cluster := getClusterAuditConfig()
+
+	mode := cluster.mode
+	if mode == "" || mode == string(kubeswarmv1alpha1.AuditLogModeOff) {
 		// Check if agent-level override enables audit.
 		if agent.Spec.Observability != nil &&
 			agent.Spec.Observability.AuditLog != nil &&
@@ -2084,37 +2534,30 @@ func buildAuditLogEnvVar(agent *kubeswarmv1alpha1.SwarmAgent) string {
 		agent.Spec.Observability.AuditLog != nil &&
 		agent.Spec.Observability.AuditLog.Mode != "" {
 		mode = string(agent.Spec.Observability.AuditLog.Mode)
-		if mode == "off" {
+		if mode == string(kubeswarmv1alpha1.AuditLogModeOff) {
 			return ""
 		}
 	}
 
 	cfg := map[string]any{
 		"mode": mode,
-		"sink": os.Getenv("AUDIT_LOG_SINK"),
+		"sink": cluster.sink,
 	}
-	if cfg["sink"] == "" {
-		cfg["sink"] = "stdout"
+	if cluster.maxDetailBytes > 0 {
+		cfg["maxDetailBytes"] = cluster.maxDetailBytes
 	}
-	if v := os.Getenv("AUDIT_LOG_MAX_DETAIL_BYTES"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg["maxDetailBytes"] = n
-		}
+	if cluster.redisURL != "" {
+		cfg["redisURL"] = cluster.redisURL
 	}
-	if v := os.Getenv("AUDIT_LOG_REDIS_URL"); v != "" {
-		cfg["redisURL"] = v
+	if cluster.maxStreamLen > 0 {
+		cfg["maxStreamLen"] = cluster.maxStreamLen
 	}
-	if v := os.Getenv("AUDIT_LOG_MAX_STREAM_LEN"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			cfg["maxStreamLen"] = n
-		}
+	if cluster.webhookURL != "" {
+		cfg["webhookURL"] = cluster.webhookURL
 	}
 
 	// Merge redaction patterns: cluster + agent level.
-	var redact []string
-	if v := os.Getenv("AUDIT_LOG_REDACT"); v != "" {
-		_ = json.Unmarshal([]byte(v), &redact)
-	}
+	redact := append([]string{}, cluster.redact...)
 	if agent.Spec.Observability != nil &&
 		agent.Spec.Observability.AuditLog != nil {
 		redact = append(redact, agent.Spec.Observability.AuditLog.Redact...)
@@ -2136,4 +2579,29 @@ func (r *SwarmAgentReconciler) agentImagePullPolicy() corev1.PullPolicy {
 		return r.AgentImagePullPolicy
 	}
 	return corev1.PullAlways
+}
+
+func (r *SwarmAgentReconciler) setCondition(
+	swarmAgent *kubeswarmv1alpha1.SwarmAgent,
+	condType string,
+	status metav1.ConditionStatus,
+	reason, message string,
+) {
+	setCondition(&swarmAgent.Status.Conditions, swarmAgent.Generation, condType, status, reason, message)
+}
+
+// effectiveTrust returns the explicit trust level if set, otherwise falls back
+// to the agent's guardrails.tools.trust.default. Returns "external" as the
+// ultimate fallback (matching the CRD default for ToolTrustPolicy.Default).
+func effectiveTrust(explicit kubeswarmv1alpha1.ToolTrustLevel, agent *kubeswarmv1alpha1.SwarmAgent) kubeswarmv1alpha1.ToolTrustLevel {
+	if explicit != "" {
+		return explicit
+	}
+	if agent.Spec.Guardrails != nil &&
+		agent.Spec.Guardrails.Tools != nil &&
+		agent.Spec.Guardrails.Tools.Trust != nil &&
+		agent.Spec.Guardrails.Tools.Trust.Default != "" {
+		return agent.Spec.Guardrails.Tools.Trust.Default
+	}
+	return kubeswarmv1alpha1.ToolTrustExternal
 }

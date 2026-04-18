@@ -18,14 +18,12 @@ package controller
 
 import (
 	"context"
+	"testing"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
 
 	kubeswarmv1alpha1 "github.com/kubeswarm/kubeswarm/api/v1alpha1"
 	"github.com/kubeswarm/kubeswarm/pkg/flow"
@@ -35,7 +33,7 @@ import (
 // SwarmTeam Pipeline Controller - integration tests
 // ---------------------------------------------------------------------------
 
-var _ = Describe("SwarmTeam Pipeline Controller", func() {
+func TestSwarmTeamPipelineController(t *testing.T) {
 	const (
 		resourceName = "test-pipeline"
 		namespace    = "default"
@@ -44,16 +42,16 @@ var _ = Describe("SwarmTeam Pipeline Controller", func() {
 	ctx := context.Background()
 	namespacedName := types.NamespacedName{Name: resourceName, Namespace: namespace}
 
-	AfterEach(func() {
+	cleanupTeam := func(t *testing.T) {
+		t.Helper()
 		team := &kubeswarmv1alpha1.SwarmTeam{}
 		if err := k8sClient.Get(ctx, namespacedName, team); err == nil {
-			Expect(k8sClient.Delete(ctx, team)).To(Succeed())
+			requireNoError(t, k8sClient.Delete(ctx, team))
 		}
-	})
+	}
 
-	Context("When a step references an unknown dependency (invalid DAG)", func() {
-		BeforeEach(func() {
-			By("creating a team pipeline where a step depends on a role that does not exist")
+	t.Run("When a step references an unknown dependency (invalid DAG)", func(t *testing.T) {
+		t.Run("should set Ready=False with reason InvalidDAG", func(t *testing.T) {
 			resource := &kubeswarmv1alpha1.SwarmTeam{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
@@ -71,30 +69,28 @@ var _ = Describe("SwarmTeam Pipeline Controller", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-		})
+			requireNoError(t, k8sClient.Create(ctx, resource))
+			t.Cleanup(func() { cleanupTeam(t) })
 
-		It("should set Ready=False with reason InvalidDAG", func() {
-			By("running the reconciler")
 			r := &SwarmTeamReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
+			requireNoError(t, err)
 
-			By("fetching the updated team status")
 			team := &kubeswarmv1alpha1.SwarmTeam{}
-			Expect(k8sClient.Get(ctx, namespacedName, team)).To(Succeed())
+			requireNoError(t, k8sClient.Get(ctx, namespacedName, team))
 
 			cond := apimeta.FindStatusCondition(team.Status.Conditions, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal("InvalidDAG"))
-			Expect(cond.Message).To(ContainSubstring("nonexistent-role"))
+			if cond == nil {
+				t.Fatal("expected Ready condition, got nil")
+			}
+			requireEqual(t, cond.Status, metav1.ConditionFalse)
+			requireEqual(t, cond.Reason, "InvalidDAG")
+			requireContains(t, cond.Message, "nonexistent-role")
 		})
 	})
 
-	Context("When the pipeline is valid (no task queue needed for infra reconcile)", func() {
-		BeforeEach(func() {
-			By("creating an SwarmTeam with a valid inline-role pipeline")
+	t.Run("When the pipeline is valid (no task queue needed for infra reconcile)", func(t *testing.T) {
+		t.Run("should set Ready=True with reason Reconciled", func(t *testing.T) {
 			resource := &kubeswarmv1alpha1.SwarmTeam{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
@@ -109,42 +105,41 @@ var _ = Describe("SwarmTeam Pipeline Controller", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-		})
+			requireNoError(t, k8sClient.Create(ctx, resource))
+			t.Cleanup(func() { cleanupTeam(t) })
 
-		It("should set Ready=True with reason Reconciled (infra only, no task queue needed)", func() {
-			By("running the reconciler - pipeline infra reconcile does not require a task queue")
 			r := &SwarmTeamReconciler{
 				Client:    k8sClient,
 				Scheme:    k8sClient.Scheme(),
 				TaskQueue: nil,
 			}
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
+			requireNoError(t, err)
 
 			team := &kubeswarmv1alpha1.SwarmTeam{}
-			Expect(k8sClient.Get(ctx, namespacedName, team)).To(Succeed())
+			requireNoError(t, k8sClient.Get(ctx, namespacedName, team))
 
 			cond := apimeta.FindStatusCondition(team.Status.Conditions, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-			Expect(cond.Reason).To(Equal("Reconciled"))
+			if cond == nil {
+				t.Fatal("expected Ready condition, got nil")
+			}
+			requireEqual(t, cond.Status, metav1.ConditionTrue)
+			requireEqual(t, cond.Reason, "Reconciled")
 		})
 	})
 
-	Context("When reconciling a nonexistent SwarmTeam", func() {
-		It("should return without error", func() {
+	t.Run("When reconciling a nonexistent SwarmTeam", func(t *testing.T) {
+		t.Run("should return without error", func(t *testing.T) {
 			r := &SwarmTeamReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, err := r.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: "does-not-exist", Namespace: namespace},
 			})
-			Expect(err).NotTo(HaveOccurred())
+			requireNoError(t, err)
 		})
 	})
 
-	Context("When a pipeline has a circular dependency", func() {
-		BeforeEach(func() {
-			By("creating a pipeline where role A depends on role B which depends on role A")
+	t.Run("When a pipeline has a circular dependency", func(t *testing.T) {
+		t.Run("should set Ready=False with reason InvalidDAG mentioning a cycle", func(t *testing.T) {
 			resource := &kubeswarmv1alpha1.SwarmTeam{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
@@ -161,90 +156,94 @@ var _ = Describe("SwarmTeam Pipeline Controller", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-		})
+			requireNoError(t, k8sClient.Create(ctx, resource))
+			t.Cleanup(func() { cleanupTeam(t) })
 
-		It("should set Ready=False with reason InvalidDAG mentioning a cycle", func() {
 			r := &SwarmTeamReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
-			Expect(err).NotTo(HaveOccurred())
+			requireNoError(t, err)
 
 			team := &kubeswarmv1alpha1.SwarmTeam{}
-			Expect(k8sClient.Get(ctx, namespacedName, team)).To(Succeed())
+			requireNoError(t, k8sClient.Get(ctx, namespacedName, team))
 
 			cond := apimeta.FindStatusCondition(team.Status.Conditions, "Ready")
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal("InvalidDAG"))
-			Expect(cond.Message).To(ContainSubstring("cycle"))
+			if cond == nil {
+				t.Fatal("expected Ready condition, got nil")
+			}
+			requireEqual(t, cond.Status, metav1.ConditionFalse)
+			requireEqual(t, cond.Reason, "InvalidDAG")
+			requireContains(t, cond.Message, "cycle")
 		})
 	})
-})
+}
 
 // ---- Pure function tests (flow package unit tests) ----
 
-var _ = Describe("isTruthy", func() {
-	DescribeTable("evaluates strings correctly",
-		func(input string, expected bool) {
-			Expect(flow.IsTruthy(input)).To(Equal(expected))
-		},
-		Entry("empty string is falsy", "", false),
-		Entry("false is falsy", "false", false),
-		Entry("FALSE is falsy", "FALSE", false),
-		Entry("0 is falsy", "0", false),
-		Entry("no is falsy", "no", false),
-		Entry("true is truthy", "true", true),
-		Entry("1 is truthy", "1", true),
-		Entry("yes is truthy", "yes", true),
-		Entry("non-empty string is truthy", "some output", true),
-		Entry("whitespace-only false is falsy", "  false  ", false),
-	)
-})
-
-var _ = Describe("flow package unit tests", func() {
-	Describe("DepsSucceeded", func() {
-		It("returns true when all deps are Succeeded", func() {
-			statusByName := map[string]*kubeswarmv1alpha1.PipelineStepStatus{
-				"a": {Phase: kubeswarmv1alpha1.PipelineStepPhaseSucceeded},
-			}
-			Expect(flow.DepsSucceeded([]string{"a"}, statusByName)).To(BeTrue())
+func TestIsTruthy(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		{"empty string is falsy", "", false},
+		{"false is falsy", "false", false},
+		{"FALSE is falsy", "FALSE", false},
+		{"0 is falsy", "0", false},
+		{"no is falsy", "no", false},
+		{"true is truthy", "true", true},
+		{"1 is truthy", "1", true},
+		{"yes is truthy", "yes", true},
+		{"non-empty string is truthy", "some output", true},
+		{"whitespace-only false is falsy", "  false  ", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireEqual(t, flow.IsTruthy(tc.input), tc.expected)
 		})
+	}
+}
 
-		It("returns true when a dep is Skipped", func() {
-			statusByName := map[string]*kubeswarmv1alpha1.PipelineStepStatus{
-				"a": {Phase: kubeswarmv1alpha1.PipelineStepPhaseSkipped},
-			}
-			Expect(flow.DepsSucceeded([]string{"a"}, statusByName)).To(BeTrue())
-		})
-
-		It("returns false when a dep is still Running", func() {
-			statusByName := map[string]*kubeswarmv1alpha1.PipelineStepStatus{
-				"a": {Phase: kubeswarmv1alpha1.PipelineStepPhaseRunning},
-			}
-			Expect(flow.DepsSucceeded([]string{"a"}, statusByName)).To(BeFalse())
-		})
-
-		It("returns false when a dep is missing from status", func() {
-			Expect(flow.DepsSucceeded([]string{"missing"}, map[string]*kubeswarmv1alpha1.PipelineStepStatus{})).To(BeFalse())
-		})
+func TestFlowDepsSucceeded(t *testing.T) {
+	t.Run("returns true when all deps are Succeeded", func(t *testing.T) {
+		statusByName := map[string]*kubeswarmv1alpha1.PipelineStepStatus{
+			"a": {Phase: kubeswarmv1alpha1.PipelineStepPhaseSucceeded},
+		}
+		requireTrue(t, flow.DepsSucceeded([]string{"a"}, statusByName))
 	})
-})
+
+	t.Run("returns true when a dep is Skipped", func(t *testing.T) {
+		statusByName := map[string]*kubeswarmv1alpha1.PipelineStepStatus{
+			"a": {Phase: kubeswarmv1alpha1.PipelineStepPhaseSkipped},
+		}
+		requireTrue(t, flow.DepsSucceeded([]string{"a"}, statusByName))
+	})
+
+	t.Run("returns false when a dep is still Running", func(t *testing.T) {
+		statusByName := map[string]*kubeswarmv1alpha1.PipelineStepStatus{
+			"a": {Phase: kubeswarmv1alpha1.PipelineStepPhaseRunning},
+		}
+		requireFalse(t, flow.DepsSucceeded([]string{"a"}, statusByName))
+	})
+
+	t.Run("returns false when a dep is missing from status", func(t *testing.T) {
+		requireFalse(t, flow.DepsSucceeded([]string{"missing"}, map[string]*kubeswarmv1alpha1.PipelineStepStatus{}))
+	})
+}
 
 // ---------------------------------------------------------------------------
 // SwarmTeam Pipeline Controller - infrastructure reconcile tests
 // (Pipeline execution has moved to SwarmRun controller; see swarmrun_controller_test.go)
 // ---------------------------------------------------------------------------
 
-var _ = Describe("SwarmTeam Pipeline Controller - infrastructure reconcile", func() {
+func TestSwarmTeamPipelineInfraReconcile(t *testing.T) {
 	const namespace = "default"
 	ctx := context.Background()
 
-	Context("When a pipeline team is created", func() {
+	t.Run("When a pipeline team is created", func(t *testing.T) {
 		const teamName = "team-infra-test"
 		teamNN := types.NamespacedName{Name: teamName, Namespace: namespace}
 
-		BeforeEach(func() {
-			Expect(k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmTeam{
+		t.Run("should create SwarmAgent CRs for inline roles and set phase to Ready", func(t *testing.T) {
+			requireNoError(t, k8sClient.Create(ctx, &kubeswarmv1alpha1.SwarmTeam{
 				ObjectMeta: metav1.ObjectMeta{Name: teamName, Namespace: namespace},
 				Spec: kubeswarmv1alpha1.SwarmTeamSpec{
 					Roles: []kubeswarmv1alpha1.SwarmTeamRole{
@@ -254,36 +253,34 @@ var _ = Describe("SwarmTeam Pipeline Controller - infrastructure reconcile", fun
 						{Role: "worker"},
 					},
 				},
-			})).To(Succeed())
-		})
+			}))
 
-		AfterEach(func() {
-			t := &kubeswarmv1alpha1.SwarmTeam{}
-			if err := k8sClient.Get(ctx, teamNN, t); err == nil {
-				Expect(k8sClient.Delete(ctx, t)).To(Succeed())
-			}
-			agent := &kubeswarmv1alpha1.SwarmAgent{}
-			if err := k8sClient.Get(ctx, types.NamespacedName{Name: teamName + "-worker", Namespace: namespace}, agent); err == nil {
-				Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
-			}
-		})
+			t.Cleanup(func() {
+				tm := &kubeswarmv1alpha1.SwarmTeam{}
+				if err := k8sClient.Get(ctx, teamNN, tm); err == nil {
+					requireNoError(t, k8sClient.Delete(ctx, tm))
+				}
+				agent := &kubeswarmv1alpha1.SwarmAgent{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: teamName + "-worker", Namespace: namespace}, agent); err == nil {
+					requireNoError(t, k8sClient.Delete(ctx, agent))
+				}
+			})
 
-		It("should create SwarmAgent CRs for inline roles and set phase to Ready", func() {
 			r := &SwarmTeamReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: teamNN})
-			Expect(err).NotTo(HaveOccurred())
+			requireNoError(t, err)
 
-			t := &kubeswarmv1alpha1.SwarmTeam{}
-			Expect(k8sClient.Get(ctx, teamNN, t)).To(Succeed())
-			Expect(t.Status.Phase).To(Equal(kubeswarmv1alpha1.SwarmTeamPhaseReady))
+			tm := &kubeswarmv1alpha1.SwarmTeam{}
+			requireNoError(t, k8sClient.Get(ctx, teamNN, tm))
+			requireEqual(t, tm.Status.Phase, kubeswarmv1alpha1.SwarmTeamPhaseReady)
 
 			// SwarmAgent CR should be auto-created for the inline role.
 			agent := &kubeswarmv1alpha1.SwarmAgent{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
+			requireNoError(t, k8sClient.Get(ctx, types.NamespacedName{
 				Name:      teamName + "-worker",
 				Namespace: namespace,
-			}, agent)).To(Succeed())
-			Expect(agent.Spec.Model).To(Equal("claude-haiku-4-5"))
+			}, agent))
+			requireEqual(t, agent.Spec.Model, "claude-haiku-4-5")
 		})
 	})
-})
+}

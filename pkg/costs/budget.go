@@ -52,8 +52,8 @@ type BudgetInput struct {
 	Namespace string
 	Team      string
 
-	// Period is "daily", "weekly", or "monthly".
-	Period string
+	// Period is the rolling window: PeriodDaily, PeriodWeekly, or PeriodMonthly.
+	Period Period
 
 	// Limit is the maximum spend for the period.
 	Limit float64
@@ -79,7 +79,7 @@ type StandardBudgetPolicy struct{}
 
 // Evaluate checks current spend for the period and returns OK / Warning / Exceeded.
 func (p *StandardBudgetPolicy) Evaluate(ctx context.Context, input BudgetInput, store SpendStore) (BudgetDecision, error) {
-	periodStart := periodWindowStart(input.Period)
+	periodStart := PeriodWindowStart(input.Period)
 
 	scope := SpendScope{
 		Namespace: input.Namespace,
@@ -115,25 +115,15 @@ func (p *StandardBudgetPolicy) Evaluate(ctx context.Context, input BudgetInput, 
 	return decision, nil
 }
 
-// PeriodWindowStart returns the start of the current budget window for the given period string.
-// Accepts "daily"/"day", "weekly"/"week", "monthly"/"month".
-func PeriodWindowStart(period string) time.Time {
-	return periodWindowStart(period)
-}
-
-func periodWindowStart(period string) time.Time {
+// PeriodWindowStart returns the start of the current budget window for the given period.
+func PeriodWindowStart(period Period) time.Time {
 	now := time.Now().UTC()
 	switch period {
-	case "weekly", "week":
+	case PeriodWeek:
 		return TruncateToPeriod(now, PeriodWeek)
-	case "monthly", "month":
+	case PeriodMonth:
 		return TruncateToPeriod(now, PeriodMonth)
-	default: // daily / day
+	default: // PeriodDay
 		return TruncateToPeriod(now, PeriodDay)
 	}
-}
-
-// DefaultBudgetPolicy returns the standard built-in policy.
-func DefaultBudgetPolicy() BudgetPolicy {
-	return &StandardBudgetPolicy{}
 }

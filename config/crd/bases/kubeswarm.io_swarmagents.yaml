@@ -29,14 +29,14 @@ spec:
     - jsonPath: .status.readyReplicas
       name: Ready
       type: integer
-    - jsonPath: .status.pendingTasks
-      name: Pending
-      priority: 1
-      type: integer
     - jsonPath: .status.dailyTokenUsage.totalTokens
       name: Tokens(24h)
       priority: 1
       type: integer
+    - jsonPath: .status.conditions[?(@.type=="GatewayReady")].status
+      name: Gateway
+      priority: 1
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -69,9 +69,12 @@ spec:
                 description: Agents lists other SwarmAgent or registry capabilities
                   callable as tools via A2A.
                 items:
-                  description: |-
-                    AgentConnection defines another agent callable as a tool via A2A.
-                    Exactly one of agentRef or capabilityRef must be set.
+                  description: "AgentConnection defines another agent callable as
+                    a tool via A2A.\nExactly one of agentRef or capabilityRef must
+                    be set.\n\nConstraint matrix:\n\n\tC1: exactly one of agentRef
+                    or capabilityRef\n\tC2: advisor role requires agentRef and forbids
+                    capabilityRef\n\tC3: contextPropagation only valid with advisor
+                    role"
                   properties:
                     agentRef:
                       description: |-
@@ -106,6 +109,70 @@ spec:
                           type: string
                       type: object
                       x-kubernetes-map-type: atomic
+                    contextPropagation:
+                      description: |-
+                        ContextPropagation configures how conversation context is forwarded to
+                        an advisor agent. Only valid when role is "advisor".
+                      properties:
+                        excludeSystemPrompt:
+                          description: |-
+                            ExcludeSystemPrompt prevents the executor's system prompt from being
+                            included in the context sent to the advisor.
+                          type: boolean
+                        maxAdvisorTokensPerTask:
+                          default: 0
+                          description: |-
+                            MaxAdvisorTokensPerTask caps cumulative advisor input+output tokens
+                            across all calls to this advisor within one execution attempt.
+                            0 means no per-advisor limit (cost control deferred to SwarmBudget).
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        maxCallsPerTask:
+                          default: 3
+                          description: |-
+                            MaxCallsPerTask caps how many times the executor can consult this
+                            advisor in a single task execution attempt. The counter resets when
+                            the task queue retries the task (new attempt = new counter).
+                          format: int32
+                          maximum: 50
+                          minimum: 1
+                          type: integer
+                        maxContextBytes:
+                          default: 262144
+                          description: |-
+                            MaxContextBytes caps the serialised context payload. Oldest messages
+                            are dropped to fit. Default 256KB.
+                          format: int32
+                          maximum: 1048576
+                          minimum: 1024
+                          type: integer
+                        recentMessages:
+                          default: 20
+                          description: |-
+                            RecentMessages is the number of recent conversation entries from the
+                            executor's conversation to include in the advisor's context.
+                          format: int32
+                          maximum: 200
+                          minimum: 1
+                          type: integer
+                        timeoutSeconds:
+                          default: 60
+                          description: |-
+                            TimeoutSeconds is the wall-clock timeout for an individual advisor
+                            call, from initiation to final response byte.
+                          format: int32
+                          maximum: 300
+                          minimum: 5
+                          type: integer
+                        toolName:
+                          description: |-
+                            ToolName overrides the auto-generated tool name. When empty, the
+                            tool is named consult_<sanitised_name>.
+                          maxLength: 63
+                          pattern: ^[a-z][a-z0-9_]*$
+                          type: string
+                      type: object
                     instructions:
                       description: |-
                         Instructions is operational context injected into the agent's system prompt
@@ -116,6 +183,16 @@ spec:
                         Name is the local identifier for this agent connection.
                         Used in guardrails.tools allow/deny patterns: "<name>/<capability>".
                       minLength: 1
+                      type: string
+                    role:
+                      default: tool
+                      description: |-
+                        Role defines the operational mode. "tool" (default) behaves as today.
+                        "advisor" enables context propagation and auto-injects a consult_<name>
+                        tool into the executor's tool list.
+                      enum:
+                      - tool
+                      - advisor
                       type: string
                     trust:
                       description: |-
@@ -132,6 +209,11 @@ spec:
                   x-kubernetes-validations:
                   - message: exactly one of agentRef or capabilityRef must be set
                     rule: has(self.agentRef) != has(self.capabilityRef)
+                  - message: advisor role requires agentRef and forbids capabilityRef
+                    rule: self.role != 'advisor' || (has(self.agentRef) && !has(self.capabilityRef))
+                  - message: contextPropagation is only valid when role is advisor
+                    rule: '!has(self.contextPropagation) || self.role == ''advisor'''
+                maxItems: 50
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -176,14 +258,154 @@ spec:
                         A lookup matches agents that declare ALL listed tags.
                       items:
                         type: string
+                      maxItems: 100
                       type: array
                   required:
                   - name
                   type: object
+                maxItems: 200
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              gateway:
+                description: |-
+                  Gateway configures this agent as a gateway to the swarm.
+                  When set, the operator injects registry_search and dispatch tools
+                  and adds a GatewayReady condition to status.
+                  Mutually exclusive with being an inline role in a SwarmTeam
+                  (enforced by admission webhook).
+                properties:
+                  allowGatewayTargets:
+                    default: false
+                    description: |-
+                      AllowGatewayTargets permits dispatching to other gateway agents.
+                      When false (default), the operator excludes agents with spec.gateway
+                      set from the capability list.
+                    type: boolean
+                  allowedTargets:
+                    description: |-
+                      AllowedTargets restricts which agents the gateway can dispatch to.
+                      Entries are SwarmAgent names. When empty, all non-gateway agents
+                      discoverable via the registry are allowed.
+                    items:
+                      type: string
+                    maxItems: 100
+                    type: array
+                  dispatchMode:
+                    default: enabled
+                    description: |-
+                      DispatchMode controls whether the gateway can dispatch work to other agents.
+                      "enabled" (default): registry_search and dispatch tools are both injected.
+                      "disabled": only registry_search is injected; the gateway can search but not dispatch.
+                    enum:
+                    - enabled
+                    - disabled
+                    type: string
+                  dispatchTimeoutSeconds:
+                    default: 120
+                    description: |-
+                      DispatchTimeoutSeconds is the maximum time the gateway will wait for
+                      a single dispatched task to complete.
+                    format: int32
+                    maximum: 3600
+                    minimum: 10
+                    type: integer
+                  fallback:
+                    description: |-
+                      Fallback controls what happens when no capability matches.
+                      When nil, defaults to answer-directly behavior.
+                    properties:
+                      agentRef:
+                        description: |-
+                          AgentRef names the fallback agent to dispatch to when Mode is "agent".
+                          Required when Mode is "agent", ignored otherwise.
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      mode:
+                        default: answer-directly
+                        description: Mode determines the fallback behavior.
+                        enum:
+                        - fail
+                        - answer-directly
+                        - agent
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: agentRef is required when fallback mode is 'agent'
+                      rule: self.mode != 'agent' || has(self.agentRef)
+                  filterByTags:
+                    description: |-
+                      FilterByTags filters discovery to capabilities matching ALL listed tags.
+                      Empty means no tag filtering - all capabilities in the registry are visible.
+                      Filters by AgentCapability.Tags values, not capability IDs.
+                    items:
+                      type: string
+                    maxItems: 50
+                    type: array
+                  maxDispatchCalls:
+                    default: 5
+                    description: MaxDispatchCalls caps how many times the LLM can
+                      call dispatch in a single task.
+                    format: int32
+                    maximum: 20
+                    minimum: 1
+                    type: integer
+                  maxDispatchDepth:
+                    default: 3
+                    description: MaxDispatchDepth is the maximum dispatch chain depth
+                      per task.
+                    format: int32
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                  maxResultsPerSearch:
+                    default: 10
+                    description: |-
+                      MaxResultsPerSearch caps how many capabilities registry_search returns
+                      to the LLM per call.
+                    format: int32
+                    maximum: 50
+                    minimum: 1
+                    type: integer
+                  maxSearchCalls:
+                    default: 3
+                    description: MaxSearchCalls caps how many times the LLM can call
+                      registry_search in a single task.
+                    format: int32
+                    maximum: 20
+                    minimum: 1
+                    type: integer
+                  registryRef:
+                    description: |-
+                      RegistryRef names the SwarmRegistry to query for capability discovery.
+                      Required. The registry's spec.scope controls whether discovery is
+                      namespace-scoped or cluster-wide.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                required:
+                - registryRef
+                type: object
               guardrails:
                 description: Guardrails groups tool permissions, budget enforcement,
                   and execution limits.
@@ -293,6 +515,7 @@ spec:
                           When set, only listed tool calls are permitted. Deny takes precedence over allow.
                         items:
                           type: string
+                        maxItems: 100
                         type: array
                       deny:
                         description: |-
@@ -301,6 +524,7 @@ spec:
                           Deny takes precedence over allow when both match.
                         items:
                           type: string
+                        maxItems: 100
                         type: array
                       trust:
                         description: Trust configures the default trust level and
@@ -316,11 +540,6 @@ spec:
                             - external
                             - sandbox
                             type: string
-                          enforceInputValidation:
-                            description: |-
-                              EnforceInputValidation rejects tool calls whose arguments do not match the
-                              tool's declared schema when the tool's effective trust level is sandbox.
-                            type: boolean
                         type: object
                     type: object
                 type: object
@@ -432,29 +651,23 @@ spec:
                               server.
                             minLength: 1
                             type: string
-                          tls:
+                          tlsSecretRef:
                             description: |-
-                              TLS configures mTLS for the gRPC connection.
+                              TLSSecretRef references a Secret containing TLS credentials for mTLS.
+                              The Secret must contain tls.crt, tls.key, and ca.crt.
                               When not set the connection is plaintext.
                             properties:
-                              secretRef:
-                                description: SecretRef names the Secret containing
-                                  the TLS credentials.
-                                properties:
-                                  name:
-                                    default: ""
-                                    description: |-
-                                      Name of the referent.
-                                      This field is effectively required, but due to backwards compatibility is
-                                      allowed to be empty. Instances of this type with an empty value here are
-                                      almost certainly wrong.
-                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                                    type: string
-                                type: object
-                                x-kubernetes-map-type: atomic
-                            required:
-                            - secretRef
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
                             type: object
+                            x-kubernetes-map-type: atomic
                         required:
                         - address
                         type: object
@@ -468,29 +681,23 @@ spec:
                               server.
                             minLength: 1
                             type: string
-                          tls:
+                          tlsSecretRef:
                             description: |-
-                              TLS configures mTLS for the gRPC connection.
+                              TLSSecretRef references a Secret containing TLS credentials for mTLS.
+                              The Secret must contain tls.crt, tls.key, and ca.crt.
                               When not set the connection is plaintext.
                             properties:
-                              secretRef:
-                                description: SecretRef names the Secret containing
-                                  the TLS credentials.
-                                properties:
-                                  name:
-                                    default: ""
-                                    description: |-
-                                      Name of the referent.
-                                      This field is effectively required, but due to backwards compatibility is
-                                      allowed to be empty. Instances of this type with an empty value here are
-                                      almost certainly wrong.
-                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                                    type: string
-                                type: object
-                                x-kubernetes-map-type: atomic
-                            required:
-                            - secretRef
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
                             type: object
+                            x-kubernetes-map-type: atomic
                         required:
                         - address
                         type: object
@@ -627,15 +834,24 @@ spec:
                     - message: redaction.secrets must be true when llmTurns is enabled
                       rule: '!has(self.llmTurns) || !self.llmTurns || (has(self.redaction)
                         && self.redaction.secrets)'
-                  metrics:
-                    description: Metrics controls Prometheus metrics exposure.
+                  notifyRef:
+                    description: |-
+                      NotifyRef references a SwarmNotify policy for this agent's notifications.
+                      Covers both health degradation alerts (AgentDegraded) and run completion
+                      notifications (TeamSucceeded/TeamFailed) for standalone agent runs.
+                      Takes precedence over healthCheck.notifyRef when both are set.
                     properties:
-                      enabled:
-                        default: false
-                        description: Enabled exposes a /metrics endpoint on the agent
-                          pod for Prometheus scraping.
-                        type: boolean
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
                     type: object
+                    x-kubernetes-map-type: atomic
                 type: object
               prompt:
                 description: Prompt configures the agent's system prompt.
@@ -756,6 +972,28 @@ spec:
                 description: Runtime groups replica count, autoscaling, resources,
                   and loop policy.
                 properties:
+                  artifacts:
+                    description: Artifacts configures automatic artifact saving for
+                      completed tasks.
+                    properties:
+                      format:
+                        default: text
+                        description: Format controls the file extension and content
+                          type of the saved output.
+                        enum:
+                        - text
+                        - json
+                        - markdown
+                        - yaml
+                        type: string
+                      saveOutput:
+                        description: |-
+                          SaveOutput automatically writes the task's final output to the artifact
+                          directory after each task completes. The file is named "output" with the
+                          extension determined by Format (e.g. output.txt, output.json).
+                          collectArtifacts then uploads it to the configured artifact store.
+                        type: boolean
+                    type: object
                   autoscaling:
                     description: |-
                       Autoscaling configures KEDA-based autoscaling. When set, replicas is ignored.
@@ -999,6 +1237,7 @@ spec:
                       type: string
                   type: object
                   x-kubernetes-map-type: atomic
+                maxItems: 50
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -1187,6 +1426,7 @@ spec:
                       x-kubernetes-validations:
                       - message: exactly one of url or capabilityRef must be set
                         rule: has(self.url) != has(self.capabilityRef)
+                    maxItems: 50
                     type: array
                     x-kubernetes-list-map-keys:
                     - name
@@ -1240,6 +1480,7 @@ spec:
                       - name
                       - url
                       type: object
+                    maxItems: 50
                     type: array
                     x-kubernetes-list-map-keys:
                     - name
@@ -1252,6 +1493,59 @@ spec:
           status:
             description: SwarmAgentStatus defines the observed state of SwarmAgent.
             properties:
+              advisorConnections:
+                description: AdvisorConnections reports the status of advisor-role
+                  agent connections.
+                items:
+                  description: AdvisorConnectionStatus reports the health of one advisor
+                    connection.
+                  properties:
+                    lastTransitionTime:
+                      description: LastTransitionTime is the last time Ready changed.
+                      format: date-time
+                      type: string
+                    name:
+                      description: Name matches the AgentConnection name.
+                      type: string
+                    ready:
+                      description: Ready indicates the advisor agent exists and has
+                        ready replicas.
+                      type: boolean
+                    toolInjected:
+                      description: |-
+                        ToolInjected indicates the consult_<name> tool was successfully
+                        added to the executor's tool list.
+                      type: boolean
+                    toolName:
+                      description: ToolName is the resolved tool name (consult_<name>
+                        or override).
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - name
+                  - ready
+                  - toolInjected
+                  - toolName
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              appliedFragmentCount:
+                description: |-
+                  AppliedFragmentCount is the number of prompt fragments composed into
+                  the system prompt from all applied SwarmSettings. Zero when no
+                  fragments are configured or no settings are referenced.
+                type: integer
+              appliedSettings:
+                description: |-
+                  AppliedSettings lists the names of SwarmSettings objects that were
+                  successfully resolved and composed into this agent's configuration.
+                  Empty when no settingsRefs are configured.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
               conditions:
                 description: Conditions reflect the current state of the SwarmAgent.
                 items:
@@ -1322,6 +1616,11 @@ spec:
                       sent to the LLM.
                     format: int64
                     type: integer
+                  model:
+                    description: |-
+                      Model identifies which model generated this usage record.
+                      Populated for advisor calls to enable per-model cost attribution.
+                    type: string
                   outputTokens:
                     description: |-
                       OutputTokens is the total number of final-answer/completion tokens generated
@@ -1351,6 +1650,10 @@ spec:
                 - outputTokens
                 - totalTokens
                 type: object
+              dedupEnabled:
+                description: DedupEnabled surfaces whether tool-call deduplication
+                  is active for this agent.
+                type: boolean
               desiredReplicas:
                 description: |-
                   DesiredReplicas is the autoscaling-computed target replica count.
@@ -1362,16 +1665,36 @@ spec:
                   registered at the MCP gateway.
                 items:
                   type: string
+                maxItems: 100
                 type: array
+                x-kubernetes-list-type: set
+              gateway:
+                description: |-
+                  Gateway reports gateway-specific observable state.
+                  Only populated when spec.gateway is set.
+                properties:
+                  lastCapabilitySync:
+                    description: |-
+                      LastCapabilitySync is the time the operator last updated the
+                      gateway's capability list.
+                    format: date-time
+                    type: string
+                  routableCapabilities:
+                    description: |-
+                      RoutableCapabilities is the count of capabilities injected into the
+                      gateway pod after tag filtering, readiness checks, and the 50-entry cap.
+                    format: int32
+                    type: integer
+                  totalMatchingCapabilities:
+                    description: TotalMatchingCapabilities is the count before the
+                      50-entry cap.
+                    format: int32
+                    type: integer
+                type: object
               observedGeneration:
                 description: ObservedGeneration is the .metadata.generation this status
                   reflects.
                 format: int64
-                type: integer
-              pendingTasks:
-                description: PendingTasks is the current number of tasks waiting in
-                  the queue for this agent.
-                format: int32
                 type: integer
               readyReplicas:
                 description: ReadyReplicas is the number of agent pods ready to accept
@@ -1387,6 +1710,40 @@ spec:
                 description: SystemPromptHash is the SHA-256 hex digest of the resolved
                   system prompt last applied.
                 type: string
+              toolAgentConnections:
+                description: ToolAgentConnections reports the status of tool-role
+                  agent connections.
+                items:
+                  description: ToolAgentConnectionStatus reports the status of one
+                    tool-role agent connection.
+                  properties:
+                    lastTransitionTime:
+                      description: LastTransitionTime is the last time Ready changed.
+                      format: date-time
+                      type: string
+                    name:
+                      description: Name matches the AgentConnection name.
+                      type: string
+                    ready:
+                      description: Ready indicates the target agent exists and has
+                        ready replicas.
+                      type: boolean
+                    trust:
+                      description: Trust is the trust level assigned to this connection.
+                      enum:
+                      - internal
+                      - external
+                      - sandbox
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - name
+                  - ready
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               toolConnections:
                 description: ToolConnections reports the last observed connectivity
                   state of each configured MCP server.
@@ -1394,6 +1751,15 @@ spec:
                   description: SwarmAgentMCPStatus reports the last observed health
                     of one MCP server.
                   properties:
+                    authType:
+                      description: |-
+                        AuthType reports what authentication the controller configured for this
+                        server: "none", "bearer", or "mtls". Empty means not yet evaluated.
+                      enum:
+                      - none
+                      - bearer
+                      - mtls
+                      type: string
                     healthy:
                       description: |-
                         Healthy is true when the last probe received a non-5xx HTTP response.
@@ -1408,6 +1774,15 @@ spec:
                       type: string
                     name:
                       description: Name matches MCPToolSpec.name.
+                      type: string
+                    trust:
+                      description: |-
+                        Trust is the trust level assigned to this MCP server.
+                        Mirrors spec for observability - confirms the controller applied it.
+                      enum:
+                      - internal
+                      - external
+                      - sandbox
                       type: string
                     url:
                       description: URL is the MCP server endpoint that was probed.

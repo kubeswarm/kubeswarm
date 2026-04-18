@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"sort"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -35,11 +34,11 @@ import (
 	"github.com/kubeswarm/kubeswarm/internal/registry"
 )
 
-// SwarmRegistryReconciler reconciles SwarmRegistry objects.
-//
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmregistries,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmregistries/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kubeswarm.io,resources=swarmregistries/finalizers,verbs=update
+
+// SwarmRegistryReconciler reconciles SwarmRegistry objects.
 type SwarmRegistryReconciler struct {
 	client.Client
 	Scheme            *runtime.Scheme
@@ -78,17 +77,14 @@ func (r *SwarmRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Filter to agents that explicitly opted into this registry via spec.registryRef.
 	// Agents with registryRef == "" have opted out of all indexing and are excluded.
 	// Agents with registryRef == registry.Name (or defaulted to "default") are included.
+	// Capable agents are the subset that also advertise at least one capability.
 	registered := make([]kubeswarmv1alpha1.SwarmAgent, 0, len(agentList.Items))
+	capable := make([]kubeswarmv1alpha1.SwarmAgent, 0, len(agentList.Items))
 	for _, a := range agentList.Items {
-		if a.Spec.Infrastructure != nil && a.Spec.Infrastructure.RegistryRef != nil && a.Spec.Infrastructure.RegistryRef.Name == reg.Name {
-			registered = append(registered, a)
+		if a.Spec.Infrastructure == nil || a.Spec.Infrastructure.RegistryRef == nil || a.Spec.Infrastructure.RegistryRef.Name != reg.Name {
+			continue
 		}
-	}
-
-	// Capable agents are the subset that advertise at least one capability.
-	// These are used for the capability index. All registered agents appear in the fleet.
-	capable := make([]kubeswarmv1alpha1.SwarmAgent, 0, len(registered))
-	for _, a := range registered {
+		registered = append(registered, a)
 		if len(a.Spec.Capabilities) > 0 {
 			capable = append(capable, a)
 		}
@@ -99,22 +95,22 @@ func (r *SwarmRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Annotate registered standalone agents with a per-agent stream URL so their
 	// pods get the right TASK_QUEUE_URL injected. Skip agents already assigned to
-	// a team queue (annotationTeamQueueURL set by the SwarmTeam controller).
+	// a team queue (kubeswarmv1alpha1.AnnotationTeamQueueURL set by the SwarmTeam controller).
 	if streamBase := r.agentStreamBase(); streamBase != "" {
 		for i := range registered {
 			a := &registered[i]
-			if a.Annotations[annotationTeamQueueURL] != "" {
+			if a.Annotations[kubeswarmv1alpha1.AnnotationTeamQueueURL] != "" {
 				continue // static team member - leave untouched
 			}
 			streamURL := r.buildAgentStreamURL(streamBase, a.Namespace, a.Name)
-			if a.Annotations[annotationTeamQueueURL] == streamURL {
+			if a.Annotations[kubeswarmv1alpha1.AnnotationTeamQueueURL] == streamURL {
 				continue // already up-to-date, avoid spurious patch
 			}
 			patch := client.MergeFrom(a.DeepCopy())
 			if a.Annotations == nil {
 				a.Annotations = make(map[string]string)
 			}
-			a.Annotations[annotationTeamQueueURL] = streamURL
+			a.Annotations[kubeswarmv1alpha1.AnnotationTeamQueueURL] = streamURL
 			if err := r.Patch(ctx, a, patch); err != nil {
 				logger.Error(err, "patching agent stream URL annotation", "agent", a.Name)
 			}
@@ -147,13 +143,7 @@ func (r *SwarmRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	reg.Status.Fleet = fleetSnap
 	reg.Status.ObservedGeneration = reg.Generation
 
-	apimeta.SetStatusCondition(&reg.Status.Conditions, metav1.Condition{
-		Type:               kubeswarmv1alpha1.ConditionReady,
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: reg.Generation,
-		Reason:             "IndexReady",
-		Message:            "capability index rebuilt successfully",
-	})
+	setCondition(&reg.Status.Conditions, reg.Generation, "", metav1.ConditionTrue, "IndexReady", "capability index rebuilt successfully")
 
 	logger.Info("updating SwarmRegistry status",
 		"indexedAgents", reg.Status.IndexedAgents,
@@ -290,15 +280,7 @@ func (r *SwarmRegistryReconciler) agentStreamBase() string {
 // buildAgentStreamURL constructs a Redis URL with ?stream={namespace}.{agentName}
 // so a standalone capability agent has a dedicated, predictable queue stream.
 func (r *SwarmRegistryReconciler) buildAgentStreamURL(base, namespace, agentName string) string {
-	streamName := fmt.Sprintf("%s.%s", namespace, agentName)
-	u, err := url.Parse(base)
-	if err != nil {
-		return base
-	}
-	q := u.Query()
-	q.Set("stream", streamName)
-	u.RawQuery = q.Encode()
-	return u.String()
+	return appendStreamParam(base, fmt.Sprintf("%s.%s", namespace, agentName))
 }
 
 // findRegistriesForAgent returns the SwarmRegistry CRs in the same namespace as the

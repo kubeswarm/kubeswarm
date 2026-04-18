@@ -73,6 +73,7 @@ type SwarmSettingsSecurity struct {
 	// Use this to prevent agents from calling arbitrary external MCP endpoints (T9).
 	// Example: ["https://search.mcp.example.com/", "https://browser.mcp.example.com/"]
 	// +optional
+	// +kubebuilder:validation:MaxItems=50
 	MCPAllowlist []string `json:"mcpAllowlist,omitempty"`
 
 	// RequireMCPAuth: when true, the webhook rejects SwarmAgent specs that declare MCP
@@ -99,6 +100,7 @@ type SwarmSettingsSpec struct {
 	// Fragments from all referenced SwarmSettings are applied in settingsRefs list order.
 	// When the same fragment name appears in multiple settings, the last occurrence wins.
 	// +optional
+	// +kubebuilder:validation:MaxItems=50
 	Fragments []PromptFragment `json:"fragments,omitempty"`
 
 	// PromptFragments is deprecated. Use Fragments instead.
@@ -114,8 +116,10 @@ type SwarmSettingsSpec struct {
 
 	// Observability configures namespace-level observability settings.
 	// Overrides cluster-level (Helm) defaults; can be overridden per-agent.
+	// AuditLog configures the structured audit trail at namespace level.
+	// Overrides cluster-level (Helm) audit config; can be overridden per-agent.
 	// +optional
-	Observability *SettingsObservability `json:"observability,omitempty"`
+	AuditLog *AuditLogConfig `json:"auditLog,omitempty"`
 
 	// Reasoning sets the namespace-wide default reasoning config for SwarmAgents.
 	// Per-agent spec.reasoning overrides per the RFC-0012 cascade rules.
@@ -124,14 +128,6 @@ type SwarmSettingsSpec struct {
 	// "namespace default Disabled".
 	// +optional
 	Reasoning *ReasoningDefaults `json:"reasoning,omitempty"`
-}
-
-// SettingsObservability holds namespace-level observability configuration.
-type SettingsObservability struct {
-	// AuditLog configures the structured audit trail at namespace level.
-	// Overrides cluster-level (Helm) audit config; can be overridden per-agent.
-	// +optional
-	AuditLog *AuditLogConfig `json:"auditLog,omitempty"`
 }
 
 // SwarmSettingsStatus defines the observed state of SwarmSettings.

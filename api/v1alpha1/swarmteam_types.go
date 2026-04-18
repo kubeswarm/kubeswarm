@@ -77,6 +77,7 @@ type SwarmTeamRole struct {
 	// CanDelegate lists role names this role is permitted to call via delegate().
 	// Empty means this is a leaf role - it cannot delegate further.
 	// +optional
+	// +kubebuilder:validation:MaxItems=20
 	CanDelegate []string `json:"canDelegate,omitempty"`
 
 	// Settings references SwarmSettings objects whose fragments are composed into this
@@ -101,6 +102,17 @@ type SwarmTeamRole struct {
 
 // StepValidation configures output validation for a pipeline step.
 // At least one of Contains, Schema, or Semantic must be set.
+// OnFailureAction controls what happens when step validation fails.
+// +kubebuilder:validation:Enum=fail;retry
+type OnFailureAction string
+
+const (
+	// OnFailureFail marks the step Failed immediately (default).
+	OnFailureFail OnFailureAction = "fail"
+	// OnFailureRetry resets the step to Pending for re-execution.
+	OnFailureRetry OnFailureAction = "retry"
+)
+
 // When multiple modes are configured all must pass; evaluation order is
 // Contains -> Schema -> Semantic (cheapest first).
 type StepValidation struct {
@@ -127,12 +139,11 @@ type StepValidation struct {
 	SemanticModel string `json:"semanticModel,omitempty"`
 
 	// OnFailure controls what happens when validation fails.
-	// "fail" (default) marks the step Failed immediately.
-	// "retry" resets the step to Pending for re-execution.
+	// OnFailureFail (default) marks the step Failed immediately.
+	// OnFailureRetry resets the step to Pending for re-execution.
 	// +kubebuilder:default=fail
-	// +kubebuilder:validation:Enum=fail;retry
 	// +optional
-	OnFailure string `json:"onFailure,omitempty"`
+	OnFailure OnFailureAction `json:"onFailure,omitempty"`
 
 	// MaxRetries caps validation-level retries when OnFailure is "retry".
 	// Independent of queue-level task retries.
@@ -148,20 +159,19 @@ type StepValidation struct {
 	// Evaluated before Contains, Schema, and Semantic checks.
 	// Example: ["(?i)ignore.*previous.*instructions", "(?i)act as"]
 	// +optional
+	// +kubebuilder:validation:MaxItems=50
 	RejectPatterns []string `json:"rejectPatterns,omitempty"`
 }
 
 // ArtifactStoreType identifies the storage backend for file artifacts.
-// +kubebuilder:validation:Enum=local;s3;gcs
+// +kubebuilder:validation:Enum=local;s3
 type ArtifactStoreType string
 
 const (
 	// ArtifactStoreLocal stores artifacts on the local filesystem (swarm run only).
 	ArtifactStoreLocal ArtifactStoreType = "local"
-	// ArtifactStoreS3 stores artifacts in an Amazon S3 bucket.
+	// ArtifactStoreS3 stores artifacts in an Amazon S3 (or S3-compatible) bucket.
 	ArtifactStoreS3 ArtifactStoreType = "s3"
-	// ArtifactStoreGCS stores artifacts in a Google Cloud Storage bucket.
-	ArtifactStoreGCS ArtifactStoreType = "gcs"
 )
 
 // ArtifactStoreLocalSpec configures a volume-backed local artifact store.
@@ -183,7 +193,7 @@ type ArtifactStoreLocalSpec struct {
 	ClaimName string `json:"claimName,omitempty"`
 }
 
-// ArtifactStoreS3 configures Amazon S3 artifact storage.
+// ArtifactStoreS3Spec configures Amazon S3 (or S3-compatible) artifact storage.
 type ArtifactStoreS3Spec struct {
 	// Bucket is the S3 bucket name.
 	// +kubebuilder:validation:Required
@@ -194,22 +204,13 @@ type ArtifactStoreS3Spec struct {
 	// Prefix is an optional key prefix applied to all stored artifacts.
 	// +optional
 	Prefix string `json:"prefix,omitempty"`
+	// Endpoint is the S3-compatible endpoint URL for MinIO, Ceph, R2, etc.
+	// When empty, the default AWS S3 endpoint is used.
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
 	// CredentialsSecret references a k8s Secret containing AWS_ACCESS_KEY_ID
-	// and AWS_SECRET_ACCESS_KEY keys. When empty, the default credential chain is used.
-	// +optional
-	CredentialsSecret *corev1.LocalObjectReference `json:"credentialsSecret,omitempty"`
-}
-
-// ArtifactStoreGCS configures Google Cloud Storage artifact storage.
-type ArtifactStoreGCSSpec struct {
-	// Bucket is the GCS bucket name.
-	// +kubebuilder:validation:Required
-	Bucket string `json:"bucket"`
-	// Prefix is an optional object prefix applied to all stored artifacts.
-	// +optional
-	Prefix string `json:"prefix,omitempty"`
-	// CredentialsSecret references a k8s Secret with a service account JSON key
-	// under the "credentials.json" key.
+	// and AWS_SECRET_ACCESS_KEY keys. When empty, the default credential chain
+	// is used (instance roles, IRSA, env vars).
 	// +optional
 	CredentialsSecret *corev1.LocalObjectReference `json:"credentialsSecret,omitempty"`
 }
@@ -217,7 +218,6 @@ type ArtifactStoreGCSSpec struct {
 // ArtifactStoreSpec configures where pipeline file artifacts are stored.
 // +kubebuilder:validation:XValidation:rule="self.type == 'local' || !has(self.local)",message="local config can only be set when type is local"
 // +kubebuilder:validation:XValidation:rule="self.type == 's3' || !has(self.s3)",message="s3 config can only be set when type is s3"
-// +kubebuilder:validation:XValidation:rule="self.type == 'gcs' || !has(self.gcs)",message="gcs config can only be set when type is gcs"
 type ArtifactStoreSpec struct {
 	// Type selects the storage backend.
 	// +kubebuilder:validation:Required
@@ -225,12 +225,9 @@ type ArtifactStoreSpec struct {
 	// Local configures local-disk storage. Only used when type=local.
 	// +optional
 	Local *ArtifactStoreLocalSpec `json:"local,omitempty"`
-	// S3 configures Amazon S3 storage. Only used when type=s3.
+	// S3 configures Amazon S3 (or S3-compatible) storage. Only used when type=s3.
 	// +optional
 	S3 *ArtifactStoreS3Spec `json:"s3,omitempty"`
-	// GCS configures Google Cloud Storage. Only used when type=gcs.
-	// +optional
-	GCS *ArtifactStoreGCSSpec `json:"gcs,omitempty"`
 }
 
 // ArtifactSpec declares a named file artifact produced by a pipeline step.
@@ -277,14 +274,6 @@ type SwarmTeamRoutingSpec struct {
 	// When absent and no match is found, the run fails with RoutingFailed.
 	// +optional
 	Fallback string `json:"fallback,omitempty"`
-
-	// MaxHops is the maximum number of sequential routing decisions per run.
-	// Reserved for future multi-hop support. Must be 1 in this version.
-	// +kubebuilder:default=1
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=1
-	// +optional
-	MaxHops int `json:"maxHops,omitempty"`
 }
 
 // RegistryLookupStrategy controls which agent wins when multiple match.
@@ -305,6 +294,7 @@ type RegistryLookupSpec struct {
 	Capability string `json:"capability"`
 	// Tags narrows candidates to agents that declare ALL listed tags.
 	// +optional
+	// +kubebuilder:validation:MaxItems=100
 	Tags []string `json:"tags,omitempty"`
 	// Strategy controls which agent is selected when multiple match.
 	// +kubebuilder:default=least-busy
@@ -330,6 +320,7 @@ type SwarmTeamPipelineStep struct {
 	Inputs map[string]string `json:"inputs,omitempty"`
 
 	// DependsOn lists role names (step names) that must complete before this step runs.
+	// +kubebuilder:validation:MaxItems=20
 	DependsOn []string `json:"dependsOn,omitempty"`
 
 	// If is an optional Go template expression. When set, the step only executes if the
@@ -353,6 +344,7 @@ type SwarmTeamPipelineStep struct {
 	// Artifact URLs are stored in PipelineStepStatus.Artifacts and available to
 	// downstream steps via "{{ .steps.<stepName>.artifacts.<name> }}".
 	// +optional
+	// +kubebuilder:validation:MaxItems=20
 	OutputArtifacts []ArtifactSpec `json:"outputArtifacts,omitempty"`
 
 	// InputArtifacts maps a local artifact name to an upstream step's artifact.
@@ -410,14 +402,6 @@ type SwarmTeamAutoscaling struct {
 	ScaleToZero *SwarmTeamScaleToZero `json:"scaleToZero,omitempty"`
 }
 
-// SwarmTeamLimits constrains team-level resource usage.
-type SwarmTeamLimits struct {
-	// MaxDailyTokens is the rolling 24-hour token budget across the whole team pipeline.
-	// Zero means no daily limit.
-	// +kubebuilder:validation:Minimum=1
-	MaxDailyTokens int64 `json:"maxDailyTokens,omitempty"`
-}
-
 // SwarmTeamInputSpec defines one formal input parameter for a pipeline.
 // Parameters declared here are validated and defaulted when an SwarmRun is created.
 type SwarmTeamInputSpec struct {
@@ -468,6 +452,7 @@ type SwarmTeamSpec struct {
 	// When set, required parameters are enforced and defaults are applied before
 	// an SwarmRun starts executing. Steps reference these values via "{{ .input.<name> }}".
 	// +optional
+	// +kubebuilder:validation:MaxItems=20
 	Inputs []SwarmTeamInputSpec `json:"inputs,omitempty"`
 
 	// Input is the initial data passed into the pipeline.
@@ -488,19 +473,23 @@ type SwarmTeamSpec struct {
 	// +optional
 	MaxTokens int64 `json:"maxTokens,omitempty"`
 
-	// Limits constrains team-level resource usage.
+	// MaxDailyTokens is the rolling 24-hour token budget across the whole team pipeline.
+	// Zero means no daily limit.
+	// +kubebuilder:validation:Minimum=1
 	// +optional
-	Limits *SwarmTeamLimits `json:"limits,omitempty"`
+	MaxDailyTokens int64 `json:"maxDailyTokens,omitempty"`
 
 	// Roles defines the roles that make up this team.
 	// At least one role is required unless spec.routing is set (routed mode).
 	// +optional
+	// +kubebuilder:validation:MaxItems=50
 	Roles []SwarmTeamRole `json:"roles,omitempty"`
 
 	// Pipeline defines an optional DAG of steps that drive ordered execution.
 	// When set, the team operates in pipeline mode (job semantics).
 	// When unset, the team operates in dynamic mode (service semantics).
 	// +optional
+	// +kubebuilder:validation:MaxItems=100
 	Pipeline []SwarmTeamPipelineStep `json:"pipeline,omitempty"`
 
 	// DefaultContextPolicy is applied to any step's output when it is referenced

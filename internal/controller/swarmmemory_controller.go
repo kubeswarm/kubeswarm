@@ -58,24 +58,19 @@ func (r *SwarmMemoryReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	if err := r.validate(swarmMemory); err != nil {
 		swarmMemory.Status.ObservedGeneration = swarmMemory.Generation
-		apimeta.SetStatusCondition(&swarmMemory.Status.Conditions, metav1.Condition{
-			Type:               kubeswarmv1alpha1.ConditionReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: swarmMemory.Generation,
-			Reason:             "InvalidSpec",
-			Message:            err.Error(),
-		})
+		setCondition(&swarmMemory.Status.Conditions, swarmMemory.Generation, "", metav1.ConditionFalse, "InvalidSpec", err.Error())
 		return ctrl.Result{}, r.Status().Update(ctx, swarmMemory)
 	}
 
+	// Guard: skip status write when already up-to-date.
+	existingCond := apimeta.FindStatusCondition(swarmMemory.Status.Conditions, kubeswarmv1alpha1.ConditionReady)
+	if swarmMemory.Status.ObservedGeneration == swarmMemory.Generation &&
+		existingCond != nil && existingCond.Status == metav1.ConditionTrue && existingCond.Reason == "Accepted" {
+		return ctrl.Result{}, nil
+	}
+
 	swarmMemory.Status.ObservedGeneration = swarmMemory.Generation
-	apimeta.SetStatusCondition(&swarmMemory.Status.Conditions, metav1.Condition{
-		Type:               kubeswarmv1alpha1.ConditionReady,
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: swarmMemory.Generation,
-		Reason:             "Accepted",
-		Message:            "SwarmMemory is valid and available",
-	})
+	setCondition(&swarmMemory.Status.Conditions, swarmMemory.Generation, "", metav1.ConditionTrue, "Accepted", "SwarmMemory is valid and available")
 
 	return ctrl.Result{}, r.Status().Update(ctx, swarmMemory)
 }

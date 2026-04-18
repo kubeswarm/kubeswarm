@@ -19,10 +19,10 @@ package costs
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/kubeswarm/kubeswarm/pkg/registry"
 )
 
 // SpendEntry records the cost of a single pipeline step.
@@ -86,18 +86,11 @@ type SpendStore interface {
 // The URL scheme selects the backend (e.g. "redis://...").
 type SpendStoreFactory func(url string) (SpendStore, error)
 
-var (
-	storeMu       sync.RWMutex
-	storeBackends = map[string]SpendStoreFactory{}
-)
+var storeReg registry.Registry[SpendStoreFactory]
 
 // RegisterSpendStore registers a SpendStore factory under a scheme name.
 // Call from an init() function so blank-importing the package activates it.
-func RegisterSpendStore(scheme string, f SpendStoreFactory) {
-	storeMu.Lock()
-	defer storeMu.Unlock()
-	storeBackends[scheme] = f
-}
+func RegisterSpendStore(scheme string, f SpendStoreFactory) { storeReg.Register(scheme, f) }
 
 // NewSpendStore returns a SpendStore for the given URL.
 // The URL scheme selects the backend (e.g. "redis://localhost:6379").
@@ -107,9 +100,7 @@ func NewSpendStore(url string) (SpendStore, error) {
 		return NoopSpendStore{}, nil
 	}
 	scheme, _, _ := strings.Cut(url, "://")
-	storeMu.RLock()
-	f, ok := storeBackends[scheme]
-	storeMu.RUnlock()
+	f, ok := storeReg.Lookup(scheme)
 	if !ok {
 		return nil, fmt.Errorf("no SpendStore backend registered for scheme %q; available: %s", scheme, strings.Join(SpendStoreBackends(), ", "))
 	}
@@ -117,16 +108,7 @@ func NewSpendStore(url string) (SpendStore, error) {
 }
 
 // SpendStoreBackends returns the sorted names of all registered schemes.
-func SpendStoreBackends() []string {
-	storeMu.RLock()
-	defer storeMu.RUnlock()
-	names := make([]string, 0, len(storeBackends))
-	for k := range storeBackends {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	return names
-}
+func SpendStoreBackends() []string { return storeReg.Keys() }
 
 // NoopSpendStore silently discards all writes. Useful for deployments that
 // only want cost-per-run tracking (Phase 1) without full spend history.

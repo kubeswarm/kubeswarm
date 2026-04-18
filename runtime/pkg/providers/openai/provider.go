@@ -93,6 +93,9 @@ func (p *Provider) RunTask(
 		if cfg.MaxTokensPerCall > 0 {
 			params.MaxCompletionTokens = openaisdk.Int(int64(cfg.MaxTokensPerCall))
 		}
+		if effort := mapReasoningEffort(cfg); effort != "" {
+			params.ReasoningEffort = effort
+		}
 		if len(openaiTools) > 0 {
 			params.Tools = openaiTools
 		}
@@ -339,4 +342,23 @@ func classifyOpenAIError(err error) *agenterrors.AgentError {
 
 	// Default to generic provider error.
 	return agenterrors.NewLLMError(agenterrors.ErrLLMProviderError, fmt.Sprintf("openai API error: %s", err), err)
+}
+
+// mapReasoningEffort maps the config's reasoning mode + effort hint to the
+// OpenAI SDK's ReasoningEffort parameter. Returns "" when reasoning is
+// disabled or no effort is configured.
+func mapReasoningEffort(cfg *config.Config) shared.ReasoningEffort {
+	if cfg.ReasoningMode == config.ReasoningModeDisabled || cfg.ReasoningMode == "" {
+		return ""
+	}
+	switch strings.ToLower(cfg.ReasoningEffort) {
+	case "low":
+		return shared.ReasoningEffortLow
+	case "medium":
+		return shared.ReasoningEffortMedium
+	case "high":
+		return shared.ReasoningEffortHigh
+	default:
+		return ""
+	}
 }
