@@ -16,4 +16,4 @@ spec:
             - --disable-admission-webhooks
           env:
             - name: TASK_QUEUE_URL
-              value: redis://kubeswarm-redis.kubeswarm-system.svc.cluster.local:6379
+              value: redis://redis.kubeswarm-system.svc.cluster.local:6379

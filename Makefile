@@ -96,8 +96,7 @@ docs-api: crd-ref-docs ## Generate API reference docs from Go types.
 
 .PHONY: helm-sync
 helm-sync: manifests ## Sync CRDs into the Helm chart and verify RBAC alignment.
-	@cp config/crd/bases/*.yaml $(HELM_CHART)/crds/
-	@echo "helm-sync: CRDs synced ($$(ls config/crd/bases/*.yaml | wc -l | tr -d ' ') files)."
+	@$(MAKE) -C $(HELM_CHART)/../.. sync-crds OPERATOR_CRD_DIR=$(CURDIR)/config/crd/bases
 	@bash scripts/rbac-check.sh config/rbac/role.yaml $(HELM_CHART)/templates/clusterrole.yaml
 
 .PHONY: build
@@ -133,6 +132,10 @@ fmt: ## Format all Go code.
 
 .PHONY: test
 test: test-controller test-runtime ## Run all tests.
+
+.PHONY: e2e
+e2e: ## Run e2e tests against a live cluster. Requires: running kubeswarm operator + a local OpenAI-compatible LLM (Ollama/vLLM). See test/e2e/TESTS.md.
+	@GOWORK=off go test -tags=e2e -v -count=1 -timeout=15m ./test/e2e/...
 
 .PHONY: lint
 lint: fmt lint-controller lint-runtime ## Format and run all linters.
@@ -338,6 +341,7 @@ local-up-helm: kind-create generate manifests helm-sync ## Build, load, and depl
 		-f $(HELM_CHART)/values.local.yaml \
 		--namespace kubeswarm-system --create-namespace \
 		--kube-context kind-$(KIND_CLUSTER)
+	@kubectl --context kind-$(KIND_CLUSTER) -n kubeswarm-system rollout restart deployment/kubeswarm 2>/dev/null || true
 	@kubectl --context kind-$(KIND_CLUSTER) -n kubeswarm-system rollout status deployment/kubeswarm --timeout=90s
 	@echo ""
 	@echo "Ready (Helm)."
