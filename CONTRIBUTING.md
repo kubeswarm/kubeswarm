@@ -64,7 +64,7 @@ cmd/main.go            # Operator entrypoint (dev mode)
    make manifests  # regenerates config/crd/ and config/rbac/
    ```
 
-3. Update or add a sample CR in `config/samples/`.
+3. Update the cookbook if the new field should be showcased.
 4. Update the controller if the new field needs to be acted on.
 
 ### Adding a controller feature

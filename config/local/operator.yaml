@@ -74,9 +74,9 @@ spec:
               name: webhook
           env:
             - name: TASK_QUEUE_URL
-              value: redis://kubeswarm-redis.kubeswarm-system.svc.cluster.local:6379
+              value: redis://redis.kubeswarm-system.svc.cluster.local:6379
             - name: AGENT_TASK_QUEUE_URL
-              value: redis://kubeswarm-redis.kubeswarm-system.svc.cluster.local:6379
+              value: redis://redis.kubeswarm-system.svc.cluster.local:6379
             - name: SWARM_AGENT_INJECT_AGENT_PROVIDER
               value: openai
             - name: SWARM_AGENT_INJECT_OPENAI_BASE_URL
@@ -88,6 +88,13 @@ spec:
               value: http://host.docker.internal:11434/v1
             - name: OPENAI_API_KEY
               value: ollama
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
           livenessProbe:
             httpGet:
               path: /healthz

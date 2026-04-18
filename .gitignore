@@ -51,3 +51,6 @@ cover.html
 
 # OS junk
 .DS_Store
+
+test/
+**/*/test/

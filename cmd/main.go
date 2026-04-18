@@ -268,6 +268,8 @@ func Run() {
 		os.Exit(1)
 	}
 
+	notifyDispatcher := controller.NewNotifyDispatcher(mgr.GetClient())
+
 	if err := (&controller.SwarmAgentReconciler{
 		Client:               mgr.GetClient(),
 		Scheme:               mgr.GetScheme(),
@@ -275,6 +277,7 @@ func Run() {
 		AgentImagePullPolicy: corev1.PullPolicy(agentImagePullPolicy),
 		MCPGatewayURL:        mcpGatewayURL,
 		OperatorNamespace:    os.Getenv("POD_NAMESPACE"),
+		NotifyDispatcher:     notifyDispatcher,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "SwarmAgent")
 		os.Exit(1)
@@ -439,8 +442,6 @@ func Run() {
 		operatorAuditEmitter.SetMode(audit.AuditLogMode(auditMode))
 		setupLog.Info("Audit emitter enabled for operator", "mode", auditMode)
 	}
-
-	notifyDispatcher := controller.NewNotifyDispatcher(mgr.GetClient())
 
 	// Shared capability registry - maintained by SwarmRegistryReconciler, read by SwarmRunReconciler.
 	capRegistry := &registry.Registry{}
