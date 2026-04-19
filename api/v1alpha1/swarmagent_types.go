@@ -627,6 +627,36 @@ type AgentLoopMemory struct {
 	MaxTokens int `json:"maxTokens,omitempty"`
 }
 
+// LoopSandboxConfig configures tool result sandboxing (RFC-0054).
+// When non-nil on AgentLoopPolicy, tool results exceeding ThresholdBytes are
+// stored in a per-task sandbox and replaced with a compact digest. The LLM
+// retrieves full results on demand via the built-in sandbox_recall tool.
+type LoopSandboxConfig struct {
+	// ThresholdBytes is the minimum result size (in bytes) that triggers
+	// sandboxing. Results smaller than this pass through unchanged.
+	// +kubebuilder:default=2048
+	// +kubebuilder:validation:Minimum=256
+	// +kubebuilder:validation:Maximum=1048576
+	// +optional
+	ThresholdBytes int32 `json:"thresholdBytes,omitempty"`
+
+	// PreviewBytes is the number of bytes included in the digest preview.
+	// Truncated at a valid UTF-8 boundary with a "(truncated)" marker.
+	// +kubebuilder:default=200
+	// +kubebuilder:validation:Minimum=50
+	// +kubebuilder:validation:Maximum=4096
+	// +optional
+	PreviewBytes int32 `json:"previewBytes,omitempty"`
+
+	// MaxTotalBytes caps the total bytes stored in the per-task sandbox.
+	// When exceeded, new results pass through unsandboxed (fail-open).
+	// +kubebuilder:default=52428800
+	// +kubebuilder:validation:Minimum=1048576
+	// +kubebuilder:validation:Maximum=268435456
+	// +optional
+	MaxTotalBytes int32 `json:"maxTotalBytes,omitempty"`
+}
+
 // AgentLoopPolicy configures the agent runner's agentic loop behaviour.
 type AgentLoopPolicy struct {
 	// Dedup skips tool calls whose fingerprint (tool name + args hash) was already
@@ -644,6 +674,13 @@ type AgentLoopPolicy struct {
 	// Requires a SwarmMemory with a vector backend referenced via memory.ref.
 	// +optional
 	Memory *AgentLoopMemory `json:"memory,omitempty"`
+
+	// Sandbox configures tool result sandboxing (RFC-0054). When set, large tool
+	// results are stored in a per-task sandbox and replaced with compact digests.
+	// The LLM retrieves full results on demand via the sandbox_recall built-in tool.
+	// Nil means sandboxing is disabled (default).
+	// +optional
+	Sandbox *LoopSandboxConfig `json:"sandbox,omitempty"`
 }
 
 // AgentRuntime groups all execution concerns for the agent deployment.

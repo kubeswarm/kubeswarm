@@ -1143,6 +1143,41 @@ spec:
                               injected per tool call.
                             type: integer
                         type: object
+                      sandbox:
+                        description: |-
+                          Sandbox configures tool result sandboxing (RFC-0054). When set, large tool
+                          results are stored in a per-task sandbox and replaced with compact digests.
+                          The LLM retrieves full results on demand via the sandbox_recall built-in tool.
+                          Nil means sandboxing is disabled (default).
+                        properties:
+                          maxTotalBytes:
+                            default: 52428800
+                            description: |-
+                              MaxTotalBytes caps the total bytes stored in the per-task sandbox.
+                              When exceeded, new results pass through unsandboxed (fail-open).
+                            format: int32
+                            maximum: 268435456
+                            minimum: 1048576
+                            type: integer
+                          previewBytes:
+                            default: 200
+                            description: |-
+                              PreviewBytes is the number of bytes included in the digest preview.
+                              Truncated at a valid UTF-8 boundary with a "(truncated)" marker.
+                            format: int32
+                            maximum: 4096
+                            minimum: 50
+                            type: integer
+                          thresholdBytes:
+                            default: 2048
+                            description: |-
+                              ThresholdBytes is the minimum result size (in bytes) that triggers
+                              sandboxing. Results smaller than this pass through unchanged.
+                            format: int32
+                            maximum: 1048576
+                            minimum: 256
+                            type: integer
+                        type: object
                     type: object
                   replicas:
                     default: 1
