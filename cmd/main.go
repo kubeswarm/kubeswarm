@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -171,6 +172,22 @@ func (p *boolProbe) Check(_ context.Context) error {
 	return nil
 }
 
+// parseImagePullSecrets converts a comma-separated list of secret names into
+// a slice of LocalObjectReference. Empty input returns nil.
+func parseImagePullSecrets(raw string) []corev1.LocalObjectReference {
+	if raw == "" {
+		return nil
+	}
+	var refs []corev1.LocalObjectReference
+	for name := range strings.SplitSeq(raw, ",") {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			refs = append(refs, corev1.LocalObjectReference{Name: name})
+		}
+	}
+	return refs
+}
+
 // Run starts the kubeswarm controller. It is called from the binary entrypoint in
 // runtime/cmd/kubeswarm-controller/main.go after all plugin init() functions have run.
 func Run() {
@@ -183,6 +200,7 @@ func Run() {
 	var enableHTTP2 bool
 	var agentImage string
 	var agentImagePullPolicy string
+	var agentImagePullSecretsRaw string
 	var triggerWebhookAddr string
 	var triggerWebhookURL string
 	var mcpGatewayAddr string
@@ -211,6 +229,8 @@ func Run() {
 		"Container image used for agent runtime pods.")
 	flag.StringVar(&agentImagePullPolicy, "agent-image-pull-policy", "Always",
 		"ImagePullPolicy for agent runtime pods. Use Never for local kind development.")
+	flag.StringVar(&agentImagePullSecretsRaw, "agent-image-pull-secrets", "",
+		"Comma-separated list of secret names for pulling agent images from private registries.")
 	flag.StringVar(&triggerWebhookAddr, "trigger-webhook-addr", ":8092",
 		"Address for the SwarmEvent webhook HTTP server to listen on.")
 	flag.StringVar(&triggerWebhookURL, "trigger-webhook-url", "",
@@ -271,13 +291,14 @@ func Run() {
 	notifyDispatcher := controller.NewNotifyDispatcher(mgr.GetClient())
 
 	if err := (&controller.SwarmAgentReconciler{
-		Client:               mgr.GetClient(),
-		Scheme:               mgr.GetScheme(),
-		AgentImage:           agentImage,
-		AgentImagePullPolicy: corev1.PullPolicy(agentImagePullPolicy),
-		MCPGatewayURL:        mcpGatewayURL,
-		OperatorNamespace:    os.Getenv("POD_NAMESPACE"),
-		NotifyDispatcher:     notifyDispatcher,
+		Client:                mgr.GetClient(),
+		Scheme:                mgr.GetScheme(),
+		AgentImage:            agentImage,
+		AgentImagePullPolicy:  corev1.PullPolicy(agentImagePullPolicy),
+		AgentImagePullSecrets: parseImagePullSecrets(agentImagePullSecretsRaw),
+		MCPGatewayURL:         mcpGatewayURL,
+		OperatorNamespace:     os.Getenv("POD_NAMESPACE"),
+		NotifyDispatcher:      notifyDispatcher,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "SwarmAgent")
 		os.Exit(1)

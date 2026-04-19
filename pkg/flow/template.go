@@ -75,7 +75,7 @@ func getOrParseTemplate(tmplStr string) (*template.Template, error) {
 // ResolveTeamPrompt resolves inputs and optional OutputSchema for an SwarmTeam pipeline step.
 func ResolveTeamPrompt(step kubeswarmv1alpha1.SwarmTeamPipelineStep, data map[string]any) (string, error) {
 	var buf bytes.Buffer
-	for key, tmplStr := range step.Inputs {
+	for key, tmplStr := range step.Inputs { //nolint:maprange // order-independent: each line is a key-value pair in an LLM prompt
 		resolved, err := ResolveTemplate(tmplStr, data)
 		if err != nil {
 			return "", fmt.Errorf("input %q: %w", key, err)
