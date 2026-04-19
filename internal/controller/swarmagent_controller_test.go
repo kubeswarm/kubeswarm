@@ -37,6 +37,71 @@ var injFrag = "\n\n" + strings.TrimSpace(pkgflow.InjectionDefenceFragment)
 
 // ---- Pure function tests ----
 
+func TestAgentImagePullSecrets(t *testing.T) {
+	operatorSecrets := []corev1.LocalObjectReference{
+		{Name: "harbor-creds"},
+		{Name: "ecr-creds"},
+	}
+	agentSecrets := []corev1.LocalObjectReference{
+		{Name: "agent-private-reg"},
+	}
+
+	tests := []struct {
+		name            string
+		reconcilerCreds []corev1.LocalObjectReference
+		agentCreds      []corev1.LocalObjectReference
+		want            []corev1.LocalObjectReference
+	}{
+		{
+			name:            "no secrets configured anywhere",
+			reconcilerCreds: nil,
+			agentCreds:      nil,
+			want:            nil,
+		},
+		{
+			name:            "operator-level secrets used when agent has none",
+			reconcilerCreds: operatorSecrets,
+			agentCreds:      nil,
+			want:            operatorSecrets,
+		},
+		{
+			name:            "per-agent secrets override operator-level",
+			reconcilerCreds: operatorSecrets,
+			agentCreds:      agentSecrets,
+			want:            agentSecrets,
+		},
+		{
+			name:            "per-agent secrets used when operator has none",
+			reconcilerCreds: nil,
+			agentCreds:      agentSecrets,
+			want:            agentSecrets,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &SwarmAgentReconciler{
+				AgentImagePullSecrets: tt.reconcilerCreds,
+			}
+			agent := &kubeswarmv1alpha1.SwarmAgent{
+				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
+					Runtime: kubeswarmv1alpha1.AgentRuntime{
+						ImagePullSecrets: tt.agentCreds,
+					},
+				},
+			}
+			got := r.agentImagePullSecrets(agent)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d secrets, want %d", len(got), len(tt.want))
+			}
+			for i := range got {
+				if got[i].Name != tt.want[i].Name {
+					t.Errorf("secret[%d] = %q, want %q", i, got[i].Name, tt.want[i].Name)
+				}
+			}
+		})
+	}
+}
+
 func TestAssembleSystemPrompt(t *testing.T) {
 	t.Run("returns base unchanged when settings slice is empty", func(t *testing.T) {
 		requireEqual(t, assembleSystemPrompt("base prompt", nil, nil), "base prompt"+injFrag)

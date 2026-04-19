@@ -74,31 +74,6 @@ generate: controller-gen ## Regenerate deepcopy methods after type changes.
 manifests: controller-gen ## Regenerate CRDs and RBAC after marker changes.
 	@GOWORK=off "$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 
-HELM_CHART ?= ../helm-charts/charts/kubeswarm
-
-DOCS_PATH ?= ../kubeswarm-docs/docs/reference/api.md
-
-.PHONY: docs-api
-docs-api: crd-ref-docs ## Generate API reference docs from Go types.
-	@GOWORK=off "$(CRD_REF_DOCS)" \
-		--source-path=./api/v1alpha1 \
-		--config=./docs/crd-ref-docs.yaml \
-		--output-path=/tmp/swarm-api-ref.md \
-		--renderer=markdown
-	@printf -- '---\nid: api\ntitle: API Reference\nsidebar_position: 1\ndescription: Complete field reference for all kubeswarm/v1alpha1 CRDs.\n---\n\n' > $(DOCS_PATH)
-	@sed 's/<\([a-zA-Z][a-zA-Z0-9_:-]*\)>/\&lt;\1\&gt;/g' /tmp/swarm-api-ref.md \
-		| sed 's/<\/\([a-zA-Z][a-zA-Z0-9_:-]*\)>/\&lt;\/\1\&gt;/g' \
-		| sed 's/Optional: \\{\\}/Optional: true/g' \
-		| sed 's/Required: \\{\\}/Required: true/g' \
-		| sed 's/{{/\&#123;\&#123;/g' \
-		| sed 's/}}/\&#125;\&#125;/g' >> $(DOCS_PATH)
-	@echo "Generated API reference -> $(DOCS_PATH)"
-
-.PHONY: helm-sync
-helm-sync: manifests ## Sync CRDs into the Helm chart and verify RBAC alignment.
-	@$(MAKE) -C $(HELM_CHART)/../.. sync-crds OPERATOR_CRD_DIR=$(CURDIR)/config/crd/bases
-	@bash scripts/rbac-check.sh config/rbac/role.yaml $(HELM_CHART)/templates/clusterrole.yaml
-
 .PHONY: build
 build: generate ## Compile controller and runtime binaries.
 	@echo "Building controller..."
@@ -118,8 +93,79 @@ build-installer: manifests kustomize ## Build dist/install.yaml for kubectl-base
 
 .PHONY: clean
 clean: ## Remove build artifacts and Go test cache.
-	@rm -f bin/kubeswarm-controller bin/kubeswarm-runtime cover.out runtime/cover.out
+	@rm -f bin/kubeswarm-controller bin/kubeswarm-runtime cover.out cover-unit.out cover-integration.out cover-admission.out runtime/cover.out
 	@go clean -testcache
+
+# ---------------------------------------------------------------------------
+##@ Sync
+# ---------------------------------------------------------------------------
+
+HELM_CHART ?= ../helm-charts/charts/kubeswarm
+
+DOCS_PATH ?= ../kubeswarm-docs/docs/reference/api.md
+
+.PHONY: sync-helm
+sync-helm: manifests ## Sync CRDs and RBAC into the Helm chart.
+	@$(MAKE) -C $(HELM_CHART)/../.. sync-crds OPERATOR_CRD_DIR=$(CURDIR)/config/crd/bases
+	@bash scripts/rbac-check.sh config/rbac/role.yaml $(HELM_CHART)/templates/clusterrole.yaml
+
+# Legacy alias.
+.PHONY: helm-sync
+helm-sync: sync-helm
+
+.PHONY: sync-docs
+sync-docs: crd-ref-docs ## Generate API reference docs into kubeswarm-docs.
+	@GOWORK=off "$(CRD_REF_DOCS)" \
+		--source-path=./api/v1alpha1 \
+		--config=./docs/crd-ref-docs.yaml \
+		--output-path=/tmp/swarm-api-ref.md \
+		--renderer=markdown
+	@printf -- '---\nid: api\ntitle: API Reference\nsidebar_position: 1\ndescription: Complete field reference for all kubeswarm/v1alpha1 CRDs.\n---\n\n' > $(DOCS_PATH)
+	@sed 's/<\([a-zA-Z][a-zA-Z0-9_:-]*\)>/\&lt;\1\&gt;/g' /tmp/swarm-api-ref.md \
+		| sed 's/<\/\([a-zA-Z][a-zA-Z0-9_:-]*\)>/\&lt;\/\1\&gt;/g' \
+		| sed 's/Optional: \\{\\}/Optional: true/g' \
+		| sed 's/Required: \\{\\}/Required: true/g' \
+		| sed 's/{{/\&#123;\&#123;/g' \
+		| sed 's/}}/\&#125;\&#125;/g' >> $(DOCS_PATH)
+	@echo "Generated API reference -> $(DOCS_PATH)"
+
+# Legacy alias.
+.PHONY: docs-api
+docs-api: sync-docs
+
+# ---------------------------------------------------------------------------
+##@ Test
+# ---------------------------------------------------------------------------
+
+.PHONY: test
+test: test-unit test-integration test-runtime ## Run all tests (unit + integration + runtime).
+
+.PHONY: test-unit
+test-unit: ## Run unit tests (no envtest, no cluster). Covers pkg/, api/, internal/ (excluding controller/).
+	@GOWORK=off go test $$(GOWORK=off go list ./... | grep -v /e2e | grep -v /test/admission | grep -v /internal/controller) -coverprofile cover-unit.out -covermode=atomic
+
+.PHONY: test-integration
+test-integration: setup-envtest ## Run integration tests (envtest). Covers internal/controller/ and test/admission/.
+	@KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
+		GOWORK=off go test ./internal/controller/... -coverprofile cover-integration.out -covermode=atomic
+	@if [ -d test/admission ]; then \
+		KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
+			GOWORK=off go test -tags=admission ./test/admission/... -coverprofile cover-admission.out -covermode=atomic; \
+	fi
+
+.PHONY: test-e2e
+test-e2e: ## Run e2e tests against a live cluster (requires operator + LLM).
+	@GOWORK=off go test -tags=e2e -v -count=1 -timeout=15m ./test/e2e/...
+
+.PHONY: coverage
+coverage: test ## Run all tests and open HTML coverage reports.
+	@go tool cover -html=cover-unit.out
+	@go tool cover -html=cover-integration.out
+	@cd runtime && go tool cover -html=cover.out
+
+# Keep legacy alias for backwards compatibility.
+.PHONY: e2e
+e2e: test-e2e
 
 # ---------------------------------------------------------------------------
 ##@ Quality
@@ -129,13 +175,6 @@ clean: ## Remove build artifacts and Go test cache.
 fmt: ## Format all Go code.
 	@gofmt -w .
 	@cd runtime && gofmt -w .
-
-.PHONY: test
-test: test-controller test-runtime ## Run all tests.
-
-.PHONY: e2e
-e2e: ## Run e2e tests against a live cluster. Requires: running kubeswarm operator + a local OpenAI-compatible LLM (Ollama/vLLM). See test/e2e/TESTS.md.
-	@GOWORK=off go test -tags=e2e -v -count=1 -timeout=15m ./test/e2e/...
 
 .PHONY: lint
 lint: fmt lint-controller lint-runtime ## Format and run all linters.
@@ -148,11 +187,6 @@ verify: verify-controller verify-runtime ## Verify all module dependencies.
 
 .PHONY: tidy
 tidy: tidy-controller tidy-runtime ## Run go mod tidy on all modules.
-
-.PHONY: coverage
-coverage: test ## Run all tests and open HTML coverage reports.
-	@go tool cover -html=cover.out
-	@cd runtime && go tool cover -html=cover.out
 
 .PHONY: check-unicode
 check-unicode: ## Reject Unicode smart quotes in api/ types (breaks CEL markers).
@@ -249,9 +283,15 @@ _lint-runtime: golangci-lint
 
 .PHONY: _test-controller
 _test-controller: setup-envtest
-	$(call step,Test controller)
+	$(call step,Test unit)
+	@GOWORK=off go test $$(GOWORK=off go list ./... | grep -v /e2e | grep -v /test/admission | grep -v /internal/controller) -coverprofile cover-unit.out -covermode=atomic
+	$(call step,Test integration)
 	@KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
-		GOWORK=off go test $$(GOWORK=off go list ./... | grep -v /e2e) -coverprofile cover.out -covermode=atomic
+		GOWORK=off go test ./internal/controller/... -coverprofile cover-integration.out -covermode=atomic
+	@if [ -d test/admission ]; then \
+		KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
+			GOWORK=off go test -tags=admission ./test/admission/... -coverprofile cover-admission.out -covermode=atomic; \
+	fi
 
 .PHONY: _test-runtime
 _test-runtime:
@@ -362,10 +402,9 @@ local-logs: ## Tail controller logs.
 # Per-module targets (used by CI jobs for parallel execution)
 # ---------------------------------------------------------------------------
 
+# Legacy aliases - delegate to new targets.
 .PHONY: test-controller
-test-controller: setup-envtest
-	@KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
-		GOWORK=off go test $$(GOWORK=off go list ./... | grep -v /e2e) -coverprofile cover.out -covermode=atomic
+test-controller: test-unit test-integration
 
 .PHONY: test-runtime
 test-runtime:

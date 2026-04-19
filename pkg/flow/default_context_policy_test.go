@@ -60,15 +60,14 @@ func TestDefaultContextPolicy_AppliedToNonAdjacent(t *testing.T) {
 		Strategy: "none",
 	}
 
-	result := flow.ApplyDefaultContextPolicy(
-		templateData,
-		"step-c",
-		pipeline,
-		defaultPolicy,
-		statusByName,
-		nil,
-		"default-model",
-	)
+	result := flow.ApplyDefaultContextPolicy(flow.ContextPolicyParams{
+		TemplateData:         templateData,
+		ConsumerRole:         "step-c",
+		Pipeline:             pipeline,
+		DefaultPolicy:        defaultPolicy,
+		StatusByName:         statusByName,
+		PipelineDefaultModel: "default-model",
+	})
 
 	steps := result["steps"].(map[string]any)
 
@@ -106,15 +105,11 @@ func TestDefaultContextPolicy_NilPolicyPassesThrough(t *testing.T) {
 		},
 	}
 
-	result := flow.ApplyDefaultContextPolicy(
-		original,
-		"step-b",
-		pipeline,
-		nil, // no default policy
-		nil,
-		nil,
-		"",
-	)
+	result := flow.ApplyDefaultContextPolicy(flow.ContextPolicyParams{
+		TemplateData: original,
+		ConsumerRole: "step-b",
+		Pipeline:     pipeline,
+	})
 
 	// Should return the same data.
 	steps := result["steps"].(map[string]any)
@@ -162,15 +157,15 @@ func TestDefaultContextPolicy_CompressCallsFn(t *testing.T) {
 		return "compressed version of step-a", nil
 	}
 
-	result := flow.ApplyDefaultContextPolicy(
-		templateData,
-		"step-c",
-		pipeline,
-		defaultPolicy,
-		statusByName,
-		compressFn,
-		"default-model",
-	)
+	result := flow.ApplyDefaultContextPolicy(flow.ContextPolicyParams{
+		TemplateData:         templateData,
+		ConsumerRole:         "step-c",
+		Pipeline:             pipeline,
+		DefaultPolicy:        defaultPolicy,
+		StatusByName:         statusByName,
+		CompressFn:           compressFn,
+		PipelineDefaultModel: "default-model",
+	})
 
 	if !compressCalled {
 		t.Fatal("compressFn was not called for non-adjacent step")

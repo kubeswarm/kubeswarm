@@ -75,7 +75,7 @@ func getOrParseTemplate(tmplStr string) (*template.Template, error) {
 // ResolveTeamPrompt resolves inputs and optional OutputSchema for an SwarmTeam pipeline step.
 func ResolveTeamPrompt(step kubeswarmv1alpha1.SwarmTeamPipelineStep, data map[string]any) (string, error) {
 	var buf bytes.Buffer
-	for key, tmplStr := range step.Inputs {
+	for key, tmplStr := range step.Inputs { //nolint:maprange // order-independent: each line is a key-value pair in an LLM prompt
 		resolved, err := ResolveTemplate(tmplStr, data)
 		if err != nil {
 			return "", fmt.Errorf("input %q: %w", key, err)
@@ -132,6 +132,17 @@ func BuildRunTemplateData(
 	}
 }
 
+// ContextPolicyParams groups the arguments for ApplyDefaultContextPolicy.
+type ContextPolicyParams struct {
+	TemplateData         map[string]any
+	ConsumerRole         string
+	Pipeline             []kubeswarmv1alpha1.SwarmTeamPipelineStep
+	DefaultPolicy        *kubeswarmv1alpha1.StepContextPolicy
+	StatusByName         map[string]*kubeswarmv1alpha1.PipelineStepStatus
+	CompressFn           func(model, prompt string) (string, error)
+	PipelineDefaultModel string
+}
+
 // ApplyDefaultContextPolicy returns a shallow copy of templateData with the
 // `.steps.<name>.output` entries overridden for non-adjacent producers according to
 // defaultPolicy. Adjacent producers (direct predecessors of consumerRole) are left
@@ -140,25 +151,17 @@ func BuildRunTemplateData(
 //
 // compressFn is called synchronously for strategy=compress. When nil, compress falls
 // back to full output for non-adjacent steps.
-func ApplyDefaultContextPolicy(
-	templateData map[string]any,
-	consumerRole string,
-	pipeline []kubeswarmv1alpha1.SwarmTeamPipelineStep,
-	defaultPolicy *kubeswarmv1alpha1.StepContextPolicy,
-	statusByName map[string]*kubeswarmv1alpha1.PipelineStepStatus,
-	compressFn func(model, prompt string) (string, error),
-	pipelineDefaultModel string,
-) map[string]any {
-	if defaultPolicy == nil {
-		return templateData
+func ApplyDefaultContextPolicy(p ContextPolicyParams) map[string]any {
+	if p.DefaultPolicy == nil {
+		return p.TemplateData
 	}
 
-	adjacent := BuildAdjacencySet(consumerRole, pipeline)
+	adjacent := BuildAdjacencySet(p.ConsumerRole, p.Pipeline)
 
 	// Build overridden steps map - only modify non-adjacent entries.
-	stepsRaw, ok := templateData["steps"].(map[string]any)
+	stepsRaw, ok := p.TemplateData["steps"].(map[string]any)
 	if !ok {
-		return templateData
+		return p.TemplateData
 	}
 
 	overridden := make(map[string]any, len(stepsRaw))
@@ -167,12 +170,12 @@ func ApplyDefaultContextPolicy(
 			overridden[name] = entry // adjacent → untouched
 			continue
 		}
-		st := statusByName[name]
+		st := p.StatusByName[name]
 		if st == nil || st.Output == "" {
 			overridden[name] = entry
 			continue
 		}
-		processed := applyPolicyToOutput(st.Output, defaultPolicy, compressFn, pipelineDefaultModel)
+		processed := applyPolicyToOutput(st.Output, p.DefaultPolicy, p.CompressFn, p.PipelineDefaultModel)
 		// Shallow-copy entry and replace output.
 		newEntry := make(map[string]any, len(entry.(map[string]any))+1)
 		maps.Copy(newEntry, entry.(map[string]any))
@@ -181,8 +184,8 @@ func ApplyDefaultContextPolicy(
 	}
 
 	// Shallow-copy templateData with the new steps map.
-	result := make(map[string]any, len(templateData))
-	maps.Copy(result, templateData)
+	result := make(map[string]any, len(p.TemplateData))
+	maps.Copy(result, p.TemplateData)
 	result["steps"] = overridden
 	return result
 }

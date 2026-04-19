@@ -402,6 +402,11 @@ func (in *AgentRuntime) DeepCopyInto(out *AgentRuntime) {
 		*out = new(AgentArtifactsConfig)
 		**out = **in
 	}
+	if in.ImagePullSecrets != nil {
+		in, out := &in.ImagePullSecrets, &out.ImagePullSecrets
+		*out = make([]v1.LocalObjectReference, len(*in))
+		copy(*out, *in)
+	}
 	if in.DrainTimeoutSeconds != nil {
 		in, out := &in.DrainTimeoutSeconds, &out.DrainTimeoutSeconds
 		*out = new(int64)

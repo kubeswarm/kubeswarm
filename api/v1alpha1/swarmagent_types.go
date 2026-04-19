@@ -714,6 +714,12 @@ type AgentRuntime struct {
 	// +optional
 	Artifacts *AgentArtifactsConfig `json:"artifacts,omitempty"`
 
+	// ImagePullSecrets is a list of references to secrets for pulling the agent
+	// container image from private registries. Overrides the operator-level
+	// --agent-image-pull-secrets flag for this agent.
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
 	// DrainTimeoutSeconds is the time to wait for in-flight tasks to complete during
 	// pod shutdown (rolling update, scale-down). Maps to terminationGracePeriodSeconds
 	// on the generated pod spec. Should be >= guardrails.limits.timeoutSeconds.

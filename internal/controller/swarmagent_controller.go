@@ -119,9 +119,10 @@ func agentResources(swarmAgent *kubeswarmv1alpha1.SwarmAgent) corev1.ResourceReq
 // SwarmAgentReconciler reconciles a SwarmAgent object
 type SwarmAgentReconciler struct {
 	client.Client
-	Scheme               *runtime.Scheme
-	AgentImage           string
-	AgentImagePullPolicy corev1.PullPolicy
+	Scheme                *runtime.Scheme
+	AgentImage            string
+	AgentImagePullPolicy  corev1.PullPolicy
+	AgentImagePullSecrets []corev1.LocalObjectReference
 	// MCPGatewayURL is the base URL of the MCP gateway, e.g.
 	// "http://kubeswarm-mcp-gateway.kubeswarm-system.svc:8082". When set, swarmAgentRef entries
 	// in spec.mcpServers are resolved to gateway URLs at reconcile time.
@@ -479,6 +480,7 @@ func (r *SwarmAgentReconciler) reconcileDeployment(ctx context.Context, in deplo
 	}
 	// mTLS volumes change when MCP servers are added/removed/reconfigured.
 	existing.Spec.Template.Spec.Volumes = desired.Spec.Template.Spec.Volumes
+	existing.Spec.Template.Spec.ImagePullSecrets = desired.Spec.Template.Spec.ImagePullSecrets
 
 	// Guard: skip the patch if nothing changed. Compare against the original
 	// snapshot (before mutation) so that env-var-only changes are detected.
@@ -821,6 +823,7 @@ func (r *SwarmAgentReconciler) buildDeployment(in deploymentInput) *appsv1.Deplo
 				Spec: corev1.PodSpec{
 					TerminationGracePeriodSeconds: in.swarmAgent.Spec.Runtime.DrainTimeoutSeconds,
 					ServiceAccountName:            agentServiceAccount,
+					ImagePullSecrets:              r.agentImagePullSecrets(swarmAgent),
 					// Pod-level security: enforce non-root user and RuntimeDefault seccomp
 					// profile. Matches the operator pod's own PodSecurityContext.
 					SecurityContext: &corev1.PodSecurityContext{
@@ -2579,6 +2582,16 @@ func (r *SwarmAgentReconciler) agentImagePullPolicy() corev1.PullPolicy {
 		return r.AgentImagePullPolicy
 	}
 	return corev1.PullAlways
+}
+
+// agentImagePullSecrets returns imagePullSecrets for an agent pod.
+// Per-agent spec.runtime.imagePullSecrets takes precedence over the
+// operator-level --agent-image-pull-secrets flag.
+func (r *SwarmAgentReconciler) agentImagePullSecrets(agent *kubeswarmv1alpha1.SwarmAgent) []corev1.LocalObjectReference {
+	if len(agent.Spec.Runtime.ImagePullSecrets) > 0 {
+		return agent.Spec.Runtime.ImagePullSecrets
+	}
+	return r.AgentImagePullSecrets
 }
 
 func (r *SwarmAgentReconciler) setCondition(

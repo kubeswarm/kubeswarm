@@ -582,20 +582,20 @@ func (r *SwarmRunReconciler) submitPendingSteps(
 		stepTemplateData := templateData
 		if run.Spec.DefaultContextPolicy != nil {
 			model := r.resolveStepModel(ctx, run, step.Role, roleModelMap, roleAgentMap)
-			stepTemplateData = flow.ApplyDefaultContextPolicy(
-				templateData,
-				step.Role,
-				run.Spec.Pipeline,
-				run.Spec.DefaultContextPolicy,
-				statusByName,
-				func(model, prompt string) (string, error) {
+			stepTemplateData = flow.ApplyDefaultContextPolicy(flow.ContextPolicyParams{
+				TemplateData:  templateData,
+				ConsumerRole:  step.Role,
+				Pipeline:      run.Spec.Pipeline,
+				DefaultPolicy: run.Spec.DefaultContextPolicy,
+				StatusByName:  statusByName,
+				CompressFn: func(model, prompt string) (string, error) {
 					if r.CompressFn == nil {
 						return "", fmt.Errorf("CompressFn not configured")
 					}
 					return r.CompressFn(ctx, model, prompt)
 				},
-				model,
-			)
+				PipelineDefaultModel: model,
+			})
 		}
 
 		// Evaluate `if` condition - skip for WarmingUp (already evaluated).
