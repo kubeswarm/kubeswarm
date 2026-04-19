@@ -55,6 +55,8 @@ const (
 	collectResultsTool  = "collect_results"
 	spawnAndCollectTool = "spawn_and_collect"
 
+	sandboxRecallTool = "sandbox_recall"
+
 	toolTypeMCP     = "mcp"
 	toolTypeBuiltin = "builtin"
 	toolTypeWebhook = "webhook"
@@ -219,6 +221,16 @@ func (r *Runner) buildTools() {
 			Name:        delegateTool,
 			Description: "Delegate a task to another role in the team. Returns the assigned task ID.",
 			InputSchema: json.RawMessage(delegateSchema),
+		})
+	}
+
+	// RFC-0054: sandbox_recall tool - only available when sandbox is configured.
+	if r.cfg.LoopPolicy != nil && r.cfg.LoopPolicy.Sandbox != nil {
+		const sandboxRecallSchema = `{"type":"object","properties":{"id":{"type":"string","description":"The sandbox ID (e.g. result-3)"}},"required":["id"]}`
+		r.allTools = append(r.allTools, mcp.Tool{
+			Name:        sandboxRecallTool,
+			Description: "Retrieve a sandboxed tool result by ID. Use when you need the full output from a previous tool call that returned a [sandboxed: ...] digest.",
+			InputSchema: json.RawMessage(sandboxRecallSchema),
 		})
 	}
 }
@@ -537,8 +549,27 @@ func (r *Runner) RunTask(ctx context.Context, task queue.Task) (string, queue.To
 		defer memHook.Close()
 	}
 
-	// Build a wrapped callTool that applies dedup, memory retrieve, and memory store.
-	callTool := r.buildCallTool(ctx, dedup, compressor, memHook)
+	// RFC-0054: create per-task sandbox for large tool results.
+	var sandbox *ToolResultSandbox
+	if lp := r.cfg.LoopPolicy; lp != nil && lp.Sandbox != nil {
+		s := lp.Sandbox
+		threshold := s.ThresholdBytes
+		if threshold <= 0 {
+			threshold = 2048
+		}
+		preview := s.PreviewBytes
+		if preview <= 0 {
+			preview = 200
+		}
+		maxTotal := s.MaxTotalBytes
+		if maxTotal <= 0 {
+			maxTotal = 52428800 // 50 MB
+		}
+		sandbox = newSandbox(threshold, preview, maxTotal)
+	}
+
+	// Build a wrapped callTool that applies dedup, memory retrieve, sandbox, and memory store.
+	callTool := r.buildCallTool(ctx, dedup, compressor, memHook, sandbox)
 
 	var chunkFn func(string)
 	if key := task.Meta["stream_key"]; key != "" && r.stream != nil {
@@ -593,15 +624,31 @@ func (r *Runner) RunTask(ctx context.Context, task queue.Task) (string, queue.To
 	return result, usage, err
 }
 
-// buildCallTool returns a callTool function that wraps r.CallTool with RFC-0026 hooks.
+// buildCallTool returns a callTool function that wraps r.CallTool with RFC-0026/0054 hooks.
 // Hooks that are nil are no-ops.
 func (r *Runner) buildCallTool(
 	_ context.Context,
 	dedup *ToolCallDeduplicator,
 	compressor *LoopCompressor,
 	memHook *LoopMemoryHook,
+	sandbox *ToolResultSandbox,
 ) func(context.Context, string, json.RawMessage) (string, error) {
 	return func(callCtx context.Context, toolName string, input json.RawMessage) (string, error) {
+		// 0. RFC-0054: sandbox_recall - retrieve sandboxed result (not re-sandboxed per DD6).
+		if toolName == sandboxRecallTool && sandbox != nil {
+			var args struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(input, &args); err != nil {
+				return "", agenterrors.NewToolError(agenterrors.ErrToolInvalidArgs, "sandbox_recall: invalid input", err)
+			}
+			recalled, ok := sandbox.Recall(args.ID)
+			if !ok {
+				return fmt.Sprintf(`{"error":"sandbox_not_found","id":"%s"}`, args.ID), nil
+			}
+			return recalled, nil
+		}
+
 		// 1. Semantic dedup: skip identical tool calls seen earlier in this task.
 		if dedup != nil && dedup.IsDuplicate(toolName, input) {
 			return "[skipped: duplicate tool call]", nil
@@ -616,7 +663,14 @@ func (r *Runner) buildCallTool(
 			return result, err
 		}
 
-		// 4. In-loop compression: track result tokens; compress if threshold crossed.
+		// 4. RFC-0054: sandbox large results, return digest.
+		if sandbox != nil {
+			if id, digest := sandbox.Store(toolName, result); id != "" {
+				result = digest
+			}
+		}
+
+		// 5. In-loop compression: track result tokens; compress if threshold crossed.
 		compressor.Track(result)
 		if compressor.NeedsCompression() {
 			if summary, ok := compressor.Compress(callCtx); ok {
@@ -624,11 +678,11 @@ func (r *Runner) buildCallTool(
 			}
 		}
 
-		// 5. Vector memory store: write result to vector store after execution.
+		// 7. Vector memory store: write result to vector store after execution.
 		//    Skipped when dedup fired (no new result produced).
 		memHook.AfterCall(callCtx, toolName, input, result)
 
-		// 6. Inject prior findings into the result returned to the model.
+		// 8. Inject prior findings into the result returned to the model.
 		result = injectPriorFindings(findings, result)
 
 		return result, nil

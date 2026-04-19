@@ -79,6 +79,16 @@ type LoopPolicyConfig struct {
 	Dedup       bool                   `json:"dedup,omitempty"`
 	Compression *LoopCompressionConfig `json:"compression,omitempty"`
 	Memory      *LoopMemoryConfig      `json:"memory,omitempty"`
+	Sandbox     *LoopSandboxConfig     `json:"sandbox,omitempty"`
+}
+
+// LoopSandboxConfig configures tool result sandboxing (RFC-0054).
+// Large tool results are stored in-memory and replaced with compact digests.
+// The LLM can retrieve full results on demand via sandbox_recall.
+type LoopSandboxConfig struct {
+	ThresholdBytes int32 `json:"thresholdBytes,omitempty"`
+	PreviewBytes   int32 `json:"previewBytes,omitempty"`
+	MaxTotalBytes  int32 `json:"maxTotalBytes,omitempty"`
 }
 
 // AuditLogConfig mirrors the CRD AuditLogConfig for structured audit logging (RFC-0030).
