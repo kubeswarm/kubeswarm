@@ -148,8 +148,10 @@ test-unit: ## Run unit tests (no envtest, no cluster). Covers pkg/, api/, intern
 test-integration: setup-envtest ## Run integration tests (envtest). Covers internal/controller/ and test/admission/.
 	@KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
 		GOWORK=off go test ./internal/controller/... -coverprofile cover-integration.out -covermode=atomic
-	@KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
-		GOWORK=off go test -tags=admission ./test/admission/... -coverprofile cover-admission.out -covermode=atomic
+	@if [ -d test/admission ]; then \
+		KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
+			GOWORK=off go test -tags=admission ./test/admission/... -coverprofile cover-admission.out -covermode=atomic; \
+	fi
 
 .PHONY: test-e2e
 test-e2e: ## Run e2e tests against a live cluster (requires operator + LLM).
@@ -286,8 +288,10 @@ _test-controller: setup-envtest
 	$(call step,Test integration)
 	@KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
 		GOWORK=off go test ./internal/controller/... -coverprofile cover-integration.out -covermode=atomic
-	@KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
-		GOWORK=off go test -tags=admission ./test/admission/... -coverprofile cover-admission.out -covermode=atomic
+	@if [ -d test/admission ]; then \
+		KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
+			GOWORK=off go test -tags=admission ./test/admission/... -coverprofile cover-admission.out -covermode=atomic; \
+	fi
 
 .PHONY: _test-runtime
 _test-runtime:
