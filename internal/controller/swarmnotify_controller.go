@@ -18,7 +18,7 @@ package controller
 
 import (
 	"context"
-	"strconv"
+	"fmt"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -68,18 +68,18 @@ func (r *SwarmNotifyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		case kubeswarmv1alpha1.NotifyChannelWebhook:
 			if ch.Webhook == nil {
 				setCondition(&notify.Status.Conditions, notify.Generation, "", metav1.ConditionFalse, "InvalidChannelConfig",
-					"channel["+strconv.Itoa(i)+"] type=webhook but webhook config is missing")
+					fmt.Sprintf("channel[%d] type=webhook but webhook config is missing", i))
 				return ctrl.Result{}, r.Status().Update(ctx, notify)
 			}
 			if ch.Webhook.URL == "" && ch.Webhook.URLFrom == nil {
 				setCondition(&notify.Status.Conditions, notify.Generation, "", metav1.ConditionFalse, "InvalidChannelConfig",
-					"channel["+strconv.Itoa(i)+"] webhook requires url or urlFrom")
+					fmt.Sprintf("channel[%d] webhook requires url or urlFrom", i))
 				return ctrl.Result{}, r.Status().Update(ctx, notify)
 			}
 		case kubeswarmv1alpha1.NotifyChannelSlack:
 			if ch.Slack == nil {
 				setCondition(&notify.Status.Conditions, notify.Generation, "", metav1.ConditionFalse, "InvalidChannelConfig",
-					"channel["+strconv.Itoa(i)+"] type=slack but slack config is missing")
+					fmt.Sprintf("channel[%d] type=slack but slack config is missing", i))
 				return ctrl.Result{}, r.Status().Update(ctx, notify)
 			}
 		}
