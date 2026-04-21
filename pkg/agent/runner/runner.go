@@ -41,6 +41,7 @@ import (
 	"github.com/kubeswarm/kubeswarm/pkg/agent/mcp"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/providers"
 	"github.com/kubeswarm/kubeswarm/pkg/agent/queue"
+	"github.com/kubeswarm/kubeswarm/pkg/agent/redact"
 	"github.com/kubeswarm/kubeswarm/pkg/audit"
 	"github.com/kubeswarm/kubeswarm/pkg/observability"
 )
@@ -95,6 +96,8 @@ type Runner struct {
 
 	// circuitBreaker wraps tool calls; nil when not configured.
 	circuitBreaker *circuit.Breaker
+	// logRedactor scrubs PII and secrets from log output; nil-safe (no-op).
+	logRedactor *redact.Redactor
 }
 
 // New creates a Runner, builds the merged tool list, and wires up the task queue
@@ -131,6 +134,10 @@ func New(cfg *config.Config, mcpManager *mcp.Manager, provider providers.LLMProv
 			namespace:    cfg.Namespace,
 			queueURL:     cfg.TaskQueueURL,
 		}
+	}
+	// Wire log redactor when PII or secret scrubbing is enabled.
+	if cfg.RedactPII || cfg.RedactSecrets {
+		r.logRedactor = redact.New(cfg.RedactPII, cfg.RedactSecrets)
 	}
 	// Wire circuit breaker when configured.
 	if cfg.CircuitBreaker != nil {
@@ -578,8 +585,27 @@ func (r *Runner) RunTask(ctx context.Context, task queue.Task) (string, queue.To
 			_ = r.stream.Publish(key, chunk)
 		}
 	}
+	// Circuit breaker: reject the task if the circuit is open from prior LLM failures.
+	if r.circuitBreaker != nil {
+		if cbErr := r.circuitBreaker.Allow(); cbErr != nil {
+			span.RecordError(cbErr)
+			span.SetStatus(codes.Error, cbErr.Error())
+			return "", queue.TokenUsage{}, fmt.Errorf("[CircuitOpen] %w", cbErr)
+		}
+	}
+
 	llmStart := time.Now()
 	result, usage, err := r.provider.RunTask(ctx, r.cfg, task, r.allTools, callTool, chunkFn)
+
+	// Circuit breaker: record LLM call success/failure.
+	if r.circuitBreaker != nil {
+		if err != nil {
+			r.circuitBreaker.RecordFailure()
+		} else {
+			r.circuitBreaker.RecordSuccess()
+		}
+	}
+
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -599,13 +625,38 @@ func (r *Runner) RunTask(ctx context.Context, task queue.Task) (string, queue.To
 		)
 	}
 
+	// LLM turn logging: emit structured log of prompt and response when enabled.
+	if r.cfg.LogLLMTurns && err == nil {
+		prompt := task.Prompt
+		output := result
+		if r.logRedactor.Active() {
+			prompt = r.logRedactor.Apply(prompt)
+			output = r.logRedactor.Apply(output)
+		}
+		turnData, _ := json.Marshal(map[string]any{
+			"event":        "llm.turn",
+			"taskId":       task.ID,
+			"model":        r.cfg.Model,
+			"prompt":       prompt,
+			"response":     output,
+			"inputTokens":  usage.InputTokens,
+			"outputTokens": usage.OutputTokens,
+			"durationMs":   time.Since(llmStart).Milliseconds(),
+		})
+		log.Println(string(turnData))
+	}
+
 	// Audit: task.completed / task.failed (RFC-0030).
 	if r.auditEmitter != nil {
 		taskDurationMs := time.Since(llmStart).Milliseconds()
 		if err != nil {
+			errMsg := err.Error()
+			if r.logRedactor.Active() {
+				errMsg = r.logRedactor.Apply(errMsg)
+			}
 			evt := r.newTaskAuditEvent(audit.ActionTaskFailed, audit.StatusError, task.ID)
 			evt.RunID = task.Meta["run_name"]
-			evt.Error = &audit.AuditError{Message: err.Error()}
+			evt.Error = &audit.AuditError{Message: errMsg}
 			evt.Timing = &audit.Timing{ExecutionMs: taskDurationMs}
 			r.auditEmitter.Emit(evt)
 		} else {
