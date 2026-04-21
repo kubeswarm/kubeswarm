@@ -65,8 +65,16 @@ type SwarmRunSpec struct {
 	// +optional
 	Input map[string]string `json:"input,omitempty"`
 
+	// Entry is the name of the entry role for dynamic-mode teams.
+	// Snapshotted from the parent SwarmTeam at trigger time.
+	// When set with an empty Pipeline and no Routing, the run operates in
+	// dynamic mode: the entry role receives the prompt and may delegate to
+	// other roles via delegate() at runtime.
+	// +optional
+	Entry string `json:"entry,omitempty"`
+
 	// Pipeline is a snapshot of the SwarmTeam pipeline DAG at trigger time.
-	// Empty for routed-mode runs.
+	// Empty for routed-mode and dynamic-mode runs.
 	// +optional
 	// +kubebuilder:validation:MaxItems=100
 	Pipeline []SwarmTeamPipelineStep `json:"pipeline,omitempty"`

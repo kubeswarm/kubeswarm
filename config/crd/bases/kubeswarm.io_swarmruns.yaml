@@ -128,6 +128,14 @@ spec:
                 required:
                 - strategy
                 type: object
+              entry:
+                description: |-
+                  Entry is the name of the entry role for dynamic-mode teams.
+                  Snapshotted from the parent SwarmTeam at trigger time.
+                  When set with an empty Pipeline and no Routing, the run operates in
+                  dynamic mode: the entry role receives the prompt and may delegate to
+                  other roles via delegate() at runtime.
+                type: string
               input:
                 additionalProperties:
                   type: string
@@ -152,7 +160,7 @@ spec:
               pipeline:
                 description: |-
                   Pipeline is a snapshot of the SwarmTeam pipeline DAG at trigger time.
-                  Empty for routed-mode runs.
+                  Empty for routed-mode and dynamic-mode runs.
                 items:
                   description: SwarmTeamPipelineStep is one node in the SwarmTeam
                     DAG pipeline.
@@ -708,7 +716,7 @@ spec:
                         inline:
                           description: |-
                             Inline is the system prompt text written directly in the manifest.
-                            For long or frequently-iterated prompts prefer from.
+                            Mutually exclusive with From.
                           type: string
                       type: object
                       x-kubernetes-validations:
@@ -1252,9 +1260,8 @@ spec:
                           description: Webhooks lists inline single-endpoint HTTP
                             tools.
                           items:
-                            description: |-
-                              WebhookToolSpec defines an inline HTTP tool available to the agent without a full MCP server.
-                              Use for simple single-endpoint callbacks. For rich integrations prefer an MCP server.
+                            description: WebhookToolSpec defines an inline HTTP tool
+                              available to the agent without a full MCP server.
                             properties:
                               description:
                                 description: Description explains the tool's purpose
