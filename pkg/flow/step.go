@@ -60,6 +60,29 @@ func InitializeRunSteps(f *kubeswarmv1alpha1.SwarmRun) {
 	SetRunCondition(f, metav1.ConditionTrue, "Validated", "Pipeline DAG is valid; execution started")
 }
 
+// InitializeDynamicStep sets up the single synthetic "entry" step for a dynamic-mode SwarmRun.
+// Dynamic mode has roles + entry but no pipeline. The entry role receives the prompt
+// and may delegate to other roles via delegate() at runtime.
+// It is a no-op if the run is already initialised (phase non-empty).
+func InitializeDynamicStep(f *kubeswarmv1alpha1.SwarmRun) {
+	if f.Status.Phase != "" {
+		return
+	}
+	now := metav1.Now()
+	f.Status.Phase = kubeswarmv1alpha1.SwarmRunPhaseRunning
+	f.Status.StartTime = &now
+	f.Status.Steps = []kubeswarmv1alpha1.PipelineStepStatus{
+		{Name: "entry", Phase: kubeswarmv1alpha1.PipelineStepPhasePending},
+	}
+	SetRunCondition(f, metav1.ConditionTrue, "Validated", "Dynamic mode; dispatching to entry role")
+}
+
+// IsDynamicMode returns true when the run is a dynamic-mode team run:
+// teamRef is set, entry is set, but pipeline and routing are empty.
+func IsDynamicMode(f *kubeswarmv1alpha1.SwarmRun) bool {
+	return f.Spec.TeamRef != "" && f.Spec.Entry != "" && len(f.Spec.Pipeline) == 0 && f.Spec.Routing == nil
+}
+
 // InitializeRouteStep sets up the single synthetic "route" step for a routed-mode SwarmRun.
 // It is a no-op if the run is already initialised (phase non-empty).
 func InitializeRouteStep(f *kubeswarmv1alpha1.SwarmRun) {

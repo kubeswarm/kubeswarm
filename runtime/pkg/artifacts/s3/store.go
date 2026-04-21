@@ -60,6 +60,7 @@ func newS3Store(rawURL string) (*s3Store, error) {
 		return nil, fmt.Errorf("s3: missing bucket in URL %q", rawURL)
 	}
 	prefix := strings.TrimPrefix(u.Path, "/")
+	prefix = strings.TrimSuffix(prefix, "/")
 
 	opts := []func(*awsconfig.LoadOptions) error{}
 	if region := u.Query().Get("region"); region != "" {

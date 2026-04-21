@@ -144,10 +144,10 @@ func (r *SwarmRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.reconcileAgentRun(ctx, run, logger)
 	}
 
-	// Snapshot the parent SwarmTeam's pipeline/routing into the run spec if not already
+	// Snapshot the parent SwarmTeam's pipeline/routing/entry into the run spec if not already
 	// present. This handles manually created SwarmRuns (kubectl apply) that only set
 	// teamRef and input. SwarmEvent-created runs already have these fields populated.
-	if run.Spec.TeamRef != "" && len(run.Spec.Pipeline) == 0 && run.Spec.Routing == nil {
+	if run.Spec.TeamRef != "" && len(run.Spec.Pipeline) == 0 && run.Spec.Routing == nil && run.Spec.Entry == "" {
 		var team kubeswarmv1alpha1.SwarmTeam
 		if err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: run.Spec.TeamRef}, &team); err != nil {
 			if errors.IsNotFound(err) {
@@ -167,6 +167,7 @@ func (r *SwarmRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			run.Labels[kubeswarmv1alpha1.LabelTeam] = run.Spec.TeamRef
 		}
 		run.Spec.TeamGeneration = team.Generation
+		run.Spec.Entry = team.Spec.Entry
 		run.Spec.Pipeline = team.Spec.Pipeline
 		run.Spec.Roles = team.Spec.Roles
 		run.Spec.Routing = team.Spec.Routing
@@ -216,6 +217,12 @@ func (r *SwarmRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if r.AuditEmitter != nil {
 			r.AuditEmitter.Emit(newRunAuditEvent(audit.ActionRunTriggered, audit.StatusSuccess, run, ""))
 		}
+	}
+
+	// Dynamic-mode team run: entry role + roles, no pipeline, no routing.
+	// Handled like an agent run but dispatched to the entry role's resolved agent.
+	if flow.IsDynamicMode(run) {
+		return r.reconcileDynamicRun(ctx, run, logger)
 	}
 
 	// Initialize steps on first reconcile (idempotent - only populates empty slice).
@@ -384,6 +391,207 @@ func (r *SwarmRunReconciler) reconcileAgentRun(
 		return ctrl.Result{RequeueAfter: runRequeueAfter}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+// reconcileDynamicRun handles dynamic-mode team runs: the entry role receives the
+// prompt and may delegate to other roles via delegate() at runtime.
+// It reuses the agent-run machinery with a synthetic "entry" step dispatched to
+// the entry role's resolved agent.
+func (r *SwarmRunReconciler) reconcileDynamicRun(
+	ctx context.Context,
+	run *kubeswarmv1alpha1.SwarmRun,
+	logger interface {
+		Info(string, ...any)
+		Error(error, string, ...any)
+	},
+) (ctrl.Result, error) {
+	// Initialize the synthetic entry step on first reconcile.
+	flow.InitializeDynamicStep(run)
+
+	st := &run.Status.Steps[0]
+
+	// Resolve the entry role's agent name.
+	roleAgentMap, _ := buildRoleMaps(run)
+	agentName := r.resolveRoleAgent(run, run.Spec.Entry, roleAgentMap)
+	st.ResolvedAgent = agentName
+
+	// Enforce run-level timeout.
+	if flow.EnforceRunTimeout(run, metav1.Now()) {
+		logger.Info("dynamic run timed out", "run", run.Name, "entry", run.Spec.Entry)
+		flow.SetRunCondition(run, metav1.ConditionFalse, "Timeout",
+			fmt.Sprintf("run exceeded timeout of %ds", run.Spec.TimeoutSeconds))
+		if r.Recorder != nil {
+			r.Recorder.Eventf(run, nil, corev1.EventTypeWarning, "RunTimedOut", "Reconcile",
+				"SwarmRun %q timed out after %ds", run.Name, run.Spec.TimeoutSeconds)
+		}
+		r.cancelRunTasks(ctx, run, logger)
+		if r.NotifyDispatcher != nil {
+			r.NotifyDispatcher.DispatchRun(ctx, run)
+		}
+		run.Status.ObservedGeneration = run.Generation
+		return ctrl.Result{}, r.Status().Update(ctx, run)
+	}
+
+	// Drive the entry step: submit or collect, depending on phase.
+	switch st.Phase {
+	case kubeswarmv1alpha1.PipelineStepPhasePending, kubeswarmv1alpha1.PipelineStepPhaseWarmingUp:
+		if err := r.submitDynamicEntryStep(ctx, run, st, agentName, logger); err != nil {
+			return ctrl.Result{}, err
+		}
+	case kubeswarmv1alpha1.PipelineStepPhaseRunning:
+		if err := r.collectDynamicResult(ctx, run, st, agentName, logger); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Derive run-level phase from the entry step.
+	r.finalizeDynamicRun(run, st)
+
+	// Dispatch notifications for terminal phase transitions.
+	if r.NotifyDispatcher != nil && flow.IsTerminalRunPhase(run.Status.Phase) {
+		r.NotifyDispatcher.DispatchRun(ctx, run)
+	}
+
+	run.Status.ObservedGeneration = run.Generation
+	if err := r.Status().Update(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
+	if run.Status.Phase == kubeswarmv1alpha1.SwarmRunPhaseRunning {
+		return ctrl.Result{RequeueAfter: runRequeueAfter}, nil
+	}
+	return ctrl.Result{}, nil
+}
+
+// submitDynamicEntryStep submits the prompt to the entry role's agent queue.
+func (r *SwarmRunReconciler) submitDynamicEntryStep(
+	ctx context.Context,
+	run *kubeswarmv1alpha1.SwarmRun,
+	st *kubeswarmv1alpha1.PipelineStepStatus,
+	agentName string,
+	logger interface{ Info(string, ...any) },
+) error {
+	// Scale-from-zero guard.
+	if ready, err := r.agentHasReadyReplicas(ctx, run.Namespace, agentName); err == nil && !ready {
+		st.Phase = kubeswarmv1alpha1.PipelineStepPhaseWarmingUp
+		st.Message = fmt.Sprintf("waiting for agent %q pods to become ready", agentName)
+		logger.Info("dynamic entry warming up", "run", run.Name, "agent", agentName)
+		return nil
+	}
+	st.Phase = kubeswarmv1alpha1.PipelineStepPhasePending
+	st.Message = ""
+
+	submitQueue, closeQueue, err := r.resolveStepQueue(ctx, run.Namespace, run.Spec.TeamRef, agentName, run.Spec.Entry)
+	if err != nil {
+		return fmt.Errorf("resolving queue for dynamic entry role: %w", err)
+	}
+
+	// Use the run's prompt, falling back to a JSON-encoded input map.
+	prompt := run.Spec.Prompt
+	if prompt == "" && len(run.Spec.Input) > 0 {
+		inputBytes, _ := json.Marshal(run.Spec.Input)
+		prompt = string(inputBytes)
+	}
+
+	taskID, err := submitQueue.Submit(ctx, prompt, map[string]string{
+		"run_name": run.Name,
+		"role":     run.Spec.Entry,
+		"mode":     "dynamic",
+	})
+	if closeQueue != nil {
+		closeQueue()
+	}
+	if err != nil {
+		return fmt.Errorf("submitting dynamic entry task: %w", err)
+	}
+
+	now := metav1.Now()
+	st.Phase = kubeswarmv1alpha1.PipelineStepPhaseRunning
+	st.TaskID = taskID
+	st.StartTime = &now
+	logger.Info("submitted dynamic entry task", "run", run.Name, "agent", agentName, "taskID", taskID)
+
+	// Audit: run.step.started (RFC-0030).
+	if r.AuditEmitter != nil {
+		evt := newRunAuditEvent(audit.ActionRunStepStarted, audit.StatusSuccess, run, agentName)
+		evt.TaskID = taskID
+		detailData, _ := json.Marshal(map[string]any{"step": "entry", "mode": "dynamic"})
+		evt.Detail = detailData
+		r.AuditEmitter.Emit(evt)
+	}
+
+	return nil
+}
+
+// collectDynamicResult polls the entry role's agent queue for the result.
+func (r *SwarmRunReconciler) collectDynamicResult(
+	ctx context.Context,
+	run *kubeswarmv1alpha1.SwarmRun,
+	st *kubeswarmv1alpha1.PipelineStepStatus,
+	agentName string,
+	logger interface{ Error(error, string, ...any) },
+) error {
+	queueURL, err := r.agentQueueURL(ctx, run.Namespace, agentName)
+	if err != nil {
+		return fmt.Errorf("reading agent queue URL for dynamic result: %w", err)
+	}
+	if queueURL == "" {
+		queueURL = r.computeRoleQueueURL(run.Namespace, run.Spec.TeamRef, run.Spec.Entry)
+	}
+	q, closeQ, err := r.openQueueURL(queueURL)
+	if err != nil {
+		return fmt.Errorf("opening queue for dynamic result: %w", err)
+	}
+	results, err := q.Results(ctx, []string{st.TaskID})
+	if closeQ != nil {
+		closeQ()
+	}
+	if err != nil {
+		logger.Error(err, "polling dynamic entry result", "run", run.Name, "taskID", st.TaskID)
+		return nil // transient error - retry on next reconcile
+	}
+	model := ""
+	if len(results) > 0 {
+		agent := &kubeswarmv1alpha1.SwarmAgent{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: agentName}, agent); err == nil {
+			model = agent.Spec.Model
+		}
+	}
+	for _, res := range results {
+		r.applyAgentResult(ctx, run, st, res, model)
+	}
+	return nil
+}
+
+// finalizeDynamicRun sets the run-level phase from the entry step's phase.
+func (r *SwarmRunReconciler) finalizeDynamicRun(
+	run *kubeswarmv1alpha1.SwarmRun,
+	st *kubeswarmv1alpha1.PipelineStepStatus,
+) {
+	switch st.Phase {
+	case kubeswarmv1alpha1.PipelineStepPhaseSucceeded:
+		now := metav1.Now()
+		run.Status.Phase = kubeswarmv1alpha1.SwarmRunPhaseSucceeded
+		run.Status.Output = st.Output
+		run.Status.CompletionTime = &now
+		if st.TokenUsage != nil {
+			run.Status.TotalTokenUsage = st.TokenUsage
+			run.Status.TotalCostUSD = st.CostUSD
+		}
+		flow.SetRunCondition(run, metav1.ConditionTrue, "Succeeded", "dynamic run completed successfully")
+		if r.Recorder != nil {
+			r.Recorder.Eventf(run, nil, corev1.EventTypeNormal, "RunSucceeded", "Reconcile",
+				"SwarmRun %q succeeded (dynamic mode, entry role %q)", run.Name, run.Spec.Entry)
+		}
+	case kubeswarmv1alpha1.PipelineStepPhaseFailed:
+		now := metav1.Now()
+		run.Status.Phase = kubeswarmv1alpha1.SwarmRunPhaseFailed
+		run.Status.CompletionTime = &now
+		flow.SetRunCondition(run, metav1.ConditionFalse, "EntryFailed", st.Message)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(run, nil, corev1.EventTypeWarning, "RunFailed", "Reconcile",
+				"SwarmRun %q failed (dynamic mode, entry role %q): %s", run.Name, run.Spec.Entry, st.Message)
+		}
+	}
 }
 
 // driveAgentStep submits the prompt (Pending/WarmingUp) or polls for a result (Running).

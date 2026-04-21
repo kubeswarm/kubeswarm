@@ -314,6 +314,19 @@ type Config struct {
 	// CircuitBreaker configures the circuit breaker for tool calls.
 	// Set via AGENT_CIRCUIT_BREAKER (JSON). Nil when not configured.
 	CircuitBreaker *CircuitBreakerConfig
+	// LogLLMTurns enables logging of the full LLM prompt and response per task.
+	// Set via AGENT_LOG_LLM_TURNS=true.
+	LogLLMTurns bool
+	// LogToolCalls enables logging of tool invocations (already emitted via audit;
+	// this flag controls the additional structured log line).
+	// Set via AGENT_LOG_TOOL_CALLS=true.
+	LogToolCalls bool
+	// RedactSecrets enables scrubbing of API key and token patterns from log output.
+	// Set via AGENT_LOG_REDACT_SECRETS=true.
+	RedactSecrets bool
+	// RedactPII enables scrubbing of email, IP, and phone patterns from log output.
+	// Set via AGENT_LOG_REDACT_PII=true.
+	RedactPII bool
 	// ArtifactSaveOutput auto-saves task output to AGENT_ARTIFACT_DIR.
 	// Set via AGENT_ARTIFACT_SAVE_OUTPUT=true.
 	ArtifactSaveOutput bool
@@ -436,6 +449,12 @@ func Load() (*Config, error) {
 
 	cfg.PolicyForceTrustLevel = os.Getenv("AGENT_POLICY_FORCE_TRUST_LEVEL")
 
+	// Observability: logging and redaction config.
+	cfg.LogLLMTurns = envBool("AGENT_LOG_LLM_TURNS")
+	cfg.LogToolCalls = envBool("AGENT_LOG_TOOL_CALLS")
+	cfg.RedactSecrets = envBool("AGENT_LOG_REDACT_SECRETS")
+	cfg.RedactPII = envBool("AGENT_LOG_REDACT_PII")
+
 	// Parse advisor connections (RFC-0048).
 	if v := os.Getenv("AGENT_ADVISORS"); v != "" {
 		var advisors []AdvisorConfig
@@ -468,7 +487,7 @@ func Load() (*Config, error) {
 		cfg.GatewayTools = tools
 	}
 
-	if os.Getenv("AGENT_ARTIFACT_SAVE_OUTPUT") == "true" {
+	if envBool("AGENT_ARTIFACT_SAVE_OUTPUT") {
 		cfg.ArtifactSaveOutput = true
 		cfg.ArtifactSaveFormat = os.Getenv("AGENT_ARTIFACT_SAVE_FORMAT")
 		if cfg.ArtifactSaveFormat == "" {
@@ -624,6 +643,11 @@ func requireEnv(key string) (string, error) {
 		return "", agenterrors.NewConfigError(agenterrors.ErrConfigMissing, fmt.Sprintf("required env var %s is not set", key), nil)
 	}
 	return v, nil
+}
+
+// envBool returns true when the named env var is set to "true".
+func envBool(key string) bool {
+	return os.Getenv(key) == "true"
 }
 
 func envOrDefault(key, def string) string {
