@@ -2193,9 +2193,12 @@ func (r *SwarmAgentReconciler) reconcileAgentServiceAccount(
 ) error {
 	ns := swarmAgent.Namespace
 
-	// Fast path: skip the 3 Gets when we've already confirmed all resources exist.
 	if _, ok := r.saEnsured.Load(ns); ok {
-		return nil
+		probe := &corev1.ServiceAccount{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: agentServiceAccount}, probe); err == nil {
+			return nil
+		}
+		r.saEnsured.Delete(ns)
 	}
 
 	// ServiceAccount.
@@ -2259,9 +2262,6 @@ func (r *SwarmAgentReconciler) reconcileAgentServiceAccount(
 // resolveAPIKeyEnvVar returns the corev1.EnvVar to inject for the API key and the
 // ResourceVersion of the referenced k8s Secret (used as a rolling-restart trigger).
 // Returns (nil, "", nil) when spec.apiKeyRef is not set.
-//
-// The env var name is the Secret key itself (e.g. key "ANTHROPIC_API_KEY" in Secret
-// "my-keys" produces env var ANTHROPIC_API_KEY sourced from that Secret).
 func (r *SwarmAgentReconciler) resolveAPIKeyEnvVar(
 	ctx context.Context,
 	swarmAgent *kubeswarmv1alpha1.SwarmAgent,
@@ -2294,7 +2294,6 @@ func (r *SwarmAgentReconciler) resolveAPIKeyEnvVar(
 
 // loadSettingsRefs fetches all SwarmSettings referenced by the agent in list order.
 // If spec.settings is absent the returned slice is empty (no settings applied).
-// A missing SwarmSettings object is treated as an error - the user must fix the reference.
 func (r *SwarmAgentReconciler) loadSettingsRefs(
 	ctx context.Context,
 	swarmAgent *kubeswarmv1alpha1.SwarmAgent,
