@@ -904,7 +904,7 @@ spec:
                         inline:
                           description: |-
                             Inline is the system prompt text written directly in the manifest.
-                            For long or frequently-iterated prompts prefer from.
+                            Mutually exclusive with From.
                           type: string
                       type: object
                       x-kubernetes-validations:
@@ -1448,9 +1448,8 @@ spec:
                           description: Webhooks lists inline single-endpoint HTTP
                             tools.
                           items:
-                            description: |-
-                              WebhookToolSpec defines an inline HTTP tool available to the agent without a full MCP server.
-                              Use for simple single-endpoint callbacks. For rich integrations prefer an MCP server.
+                            description: WebhookToolSpec defines an inline HTTP tool
+                              available to the agent without a full MCP server.
                             properties:
                               description:
                                 description: Description explains the tool's purpose

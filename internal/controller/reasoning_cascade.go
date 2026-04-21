@@ -92,18 +92,7 @@ func mergeReasoningConfig(agentCfg *v1alpha1.ReasoningConfig, allSettings []v1al
 
 // reasoningConditionReason derives the ReasoningActive condition reason
 // from the effective reasoning config and guardrail limits.
-//
-// Model-name matching is intentionally absent. Whether a model supports
-// reasoning is determined at runtime by the provider (which sees the actual
-// response), not at reconcile time by name prefix. The operator trusts the
-// user's mode: Auto/Explicit declaration. Conditions like
-// IgnoredModelNotCapable and RejectedModelNotCapable are set by the provider
-// after the first call, not here.
-//
-// At reconcile time we can detect:
-//   - Disabled (user opted out)
-//   - ClampedByGuardrail (budgetTokens > maxThinkingTokensPerCall)
-//   - Active (user opted in, no clamp detected)
+// Returns Disabled, ClampedByGuardrail, or Active.
 func reasoningConditionReason(cfg *v1alpha1.ReasoningConfig, limits *v1alpha1.GuardrailLimits) (reason string, status metav1.ConditionStatus) {
 	if cfg == nil || cfg.Mode == "" || cfg.Mode == v1alpha1.ReasoningDisabled {
 		return v1alpha1.ReasoningReasonDisabled, metav1.ConditionFalse

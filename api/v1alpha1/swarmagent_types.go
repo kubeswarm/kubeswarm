@@ -150,7 +150,6 @@ type MCPDiscoveryConfig struct {
 }
 
 // WebhookToolSpec defines an inline HTTP tool available to the agent without a full MCP server.
-// Use for simple single-endpoint callbacks. For rich integrations prefer an MCP server.
 type WebhookToolSpec struct {
 	// Name is the tool identifier exposed to the LLM. Must be unique within the agent.
 	// +kubebuilder:validation:Required
@@ -350,7 +349,7 @@ type SystemPromptSource struct {
 // +kubebuilder:validation:XValidation:rule="has(self.inline) != has(self.from)",message="exactly one of inline or from must be set"
 type AgentPrompt struct {
 	// Inline is the system prompt text written directly in the manifest.
-	// For long or frequently-iterated prompts prefer from.
+	// Mutually exclusive with From.
 	// +optional
 	Inline string `json:"inline,omitempty"`
 
