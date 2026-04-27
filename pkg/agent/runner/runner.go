@@ -94,6 +94,8 @@ type Runner struct {
 	// RFC-0026 deep-research hooks; all nil when loopPolicy is unset.
 	loopDedup bool // semantic dedup enabled for this runner
 
+	// toolCacheWrapper wraps tool calls with cache-aside logic (RFC-0038); nil when no servers have caching.
+	toolCacheWrapper *ToolCacheWrapper
 	// circuitBreaker wraps tool calls; nil when not configured.
 	circuitBreaker *circuit.Breaker
 	// logRedactor scrubs PII and secrets from log output; nil-safe (no-op).
@@ -135,6 +137,8 @@ func New(cfg *config.Config, mcpManager *mcp.Manager, provider providers.LLMProv
 			queueURL:     cfg.TaskQueueURL,
 		}
 	}
+	// RFC-0038: wire tool result cache when any MCP server has caching enabled.
+	r.toolCacheWrapper = newToolCacheWrapper(cfg.MCPServers)
 	// Wire log redactor when PII or secret scrubbing is enabled.
 	if cfg.RedactPII || cfg.RedactSecrets {
 		r.logRedactor = redact.New(cfg.RedactPII, cfg.RedactSecrets)
@@ -705,23 +709,41 @@ func (r *Runner) buildCallTool(
 			return "[skipped: duplicate tool call]", nil
 		}
 
-		// 2. Vector memory retrieve: fetch similar prior findings before dispatch.
+		// 2. RFC-0038: tool result cache - check cache before dispatch.
+		var cacheKey string
+		var cacheTTL time.Duration
+		if r.toolCacheWrapper != nil {
+			if serverCfg := r.toolCacheWrapper.ConfigForTool(toolName); serverCfg != nil {
+				cacheKey = fingerprintCall(toolName, input)
+				if cached, ok := r.toolCacheWrapper.cache.Get(callCtx, cacheKey); ok {
+					return cached, nil
+				}
+				cacheTTL = serverCfg.ttl
+			}
+		}
+
+		// 3. Vector memory retrieve: fetch similar prior findings before dispatch.
 		findings := memHook.BeforeCall(callCtx, toolName, input)
 
-		// 3. Dispatch to the real tool.
+		// 4. Dispatch to the real tool.
 		result, err := r.CallTool(callCtx, toolName, input)
 		if err != nil {
 			return result, err
 		}
 
-		// 4. RFC-0054: sandbox large results, return digest.
+		// RFC-0038: store successful result in cache.
+		if cacheKey != "" {
+			r.toolCacheWrapper.cache.Set(callCtx, cacheKey, result, cacheTTL)
+		}
+
+		// 5. RFC-0054: sandbox large results, return digest.
 		if sandbox != nil {
 			if id, digest := sandbox.Store(toolName, result); id != "" {
 				result = digest
 			}
 		}
 
-		// 5. In-loop compression: track result tokens; compress if threshold crossed.
+		// 6. In-loop compression: track result tokens; compress if threshold crossed.
 		compressor.Track(result)
 		if compressor.NeedsCompression() {
 			if summary, ok := compressor.Compress(callCtx); ok {

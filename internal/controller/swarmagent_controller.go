@@ -1166,6 +1166,14 @@ type mcpServerRuntime struct {
 	CertFile    string               `json:"certFile,omitempty"`
 	KeyFile     string               `json:"keyFile,omitempty"`
 	Discovery   *mcpDiscoveryRuntime `json:"discovery,omitempty"`
+	Cache       *mcpCacheRuntime     `json:"cache,omitempty"`
+}
+
+// mcpCacheRuntime is the runtime representation of ToolCacheConfig (RFC-0038).
+type mcpCacheRuntime struct {
+	Enabled      bool     `json:"enabled"`
+	TTLSeconds   int      `json:"ttlSeconds,omitempty"`
+	ExcludeTools []string `json:"excludeTools,omitempty"`
 }
 
 // mcpDiscoveryRuntime is the runtime representation of MCPDiscoveryConfig,
@@ -1239,6 +1247,13 @@ func buildMCPRuntimeConfigs(servers []kubeswarmv1alpha1.MCPToolSpec) []mcpServer
 			r.Discovery = &mcpDiscoveryRuntime{
 				Dynamic:             s.Discovery.Dynamic,
 				PollIntervalSeconds: s.Discovery.PollIntervalSeconds,
+			}
+		}
+		if s.Cache != nil && s.Cache.Enabled {
+			r.Cache = &mcpCacheRuntime{
+				Enabled:      true,
+				TTLSeconds:   s.Cache.TTLSeconds,
+				ExcludeTools: s.Cache.ExcludeTools,
 			}
 		}
 		out = append(out, r)
@@ -1474,6 +1489,7 @@ func (r *SwarmAgentReconciler) buildEnvVars(
 	}
 
 	envVars = append(envVars, buildCircuitBreakerEnvVars(swarmAgent)...)
+	envVars = append(envVars, buildPromptCacheEnvVars(swarmAgent)...)
 
 	// Inject advisor connection configs as JSON (RFC-0048).
 	envVars = append(envVars, buildAdvisorEnvVars(swarmAgent)...)
@@ -1588,6 +1604,19 @@ func buildCircuitBreakerEnvVars(swarmAgent *kubeswarmv1alpha1.SwarmAgent) []core
 		"halfOpenMaxCalls": cb.HalfOpenMaxCalls,
 	})
 	return []corev1.EnvVar{{Name: "AGENT_CIRCUIT_BREAKER", Value: string(cbJSON)}}
+}
+
+// buildPromptCacheEnvVars returns the AGENT_PROMPT_CACHE env var when configured (RFC-0045).
+func buildPromptCacheEnvVars(swarmAgent *kubeswarmv1alpha1.SwarmAgent) []corev1.EnvVar {
+	if swarmAgent.Spec.Efficiency == nil || swarmAgent.Spec.Efficiency.PromptCache == nil ||
+		!swarmAgent.Spec.Efficiency.PromptCache.Enabled {
+		return nil
+	}
+	raw, err := json.Marshal(swarmAgent.Spec.Efficiency.PromptCache)
+	if err != nil {
+		return nil
+	}
+	return []corev1.EnvVar{{Name: "AGENT_PROMPT_CACHE", Value: string(raw)}}
 }
 
 // buildTeamEnvVars returns env vars derived from SwarmTeam annotations/labels.

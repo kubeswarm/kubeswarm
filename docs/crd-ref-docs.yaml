@@ -6,7 +6,7 @@ processor:
 
 render:
   # Kubernetes version shown in the generated header.
-  kubernetesVersion: "1.33"
+  kubernetesVersion: "1.35"
   # Don't repeat the package path in every type heading - all types are in v1alpha1.
   showPackageName: false
   # Group output by Kind so each CRD is its own section.

@@ -66,6 +66,13 @@ type AgentMetrics struct {
 	advisorCalls    metric.Int64Counter
 	advisorDuration metric.Int64Histogram
 	advisorErrors   metric.Int64Counter
+
+	// RFC-0045: prompt cache enforcement.
+	promptCacheEligible metric.Int64Counter
+
+	// RFC-0038: tool result caching.
+	toolCacheHit  metric.Int64Counter
+	toolCacheMiss metric.Int64Counter
 }
 
 // NewAgentMetrics creates and registers all agent runtime instruments.
@@ -182,6 +189,22 @@ func NewAgentMetrics() (*AgentMetrics, error) {
 		return nil, err
 	}
 
+	// RFC-0045: prompt cache enforcement.
+	if am.promptCacheEligible, err = m.Int64Counter("kubeswarm.prompt.cache.eligible",
+		metric.WithDescription("Requests sent with prompt cache markers")); err != nil {
+		return nil, err
+	}
+
+	// RFC-0038: tool result caching.
+	if am.toolCacheHit, err = m.Int64Counter("kubeswarm.tool.cache.hit",
+		metric.WithDescription("Tool result cache hits")); err != nil {
+		return nil, err
+	}
+	if am.toolCacheMiss, err = m.Int64Counter("kubeswarm.tool.cache.miss",
+		metric.WithDescription("Tool result cache misses")); err != nil {
+		return nil, err
+	}
+
 	return am, nil
 }
 
@@ -255,6 +278,22 @@ func (am *AgentMetrics) RecordReasoningCall(ctx context.Context, thinkingTokens 
 	if thinkingTokens > 0 {
 		am.llmThinkingTokens.Add(ctx, thinkingTokens, opt)
 	}
+}
+
+// RecordToolCacheHit increments the tool cache hit counter (RFC-0038).
+func (am *AgentMetrics) RecordToolCacheHit(ctx context.Context, attrs ...attribute.KeyValue) {
+	am.toolCacheHit.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordToolCacheMiss increments the tool cache miss counter (RFC-0038).
+func (am *AgentMetrics) RecordToolCacheMiss(ctx context.Context, attrs ...attribute.KeyValue) {
+	am.toolCacheMiss.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordPromptCacheEligible increments the counter when a request is sent
+// with prompt cache markers enabled (RFC-0045).
+func (am *AgentMetrics) RecordPromptCacheEligible(ctx context.Context, attrs ...attribute.KeyValue) {
+	am.promptCacheEligible.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordReasoningClamped increments the clamp counter with a reason label.

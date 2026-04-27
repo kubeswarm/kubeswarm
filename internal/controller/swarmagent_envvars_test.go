@@ -568,4 +568,84 @@ func TestSwarmAgentControllerEnvVarMapping(t *testing.T) {
 			requireEqual(t, v, "my-team")
 		})
 	})
+
+	// -------------------------------------------------------------------------
+	// Efficiency -> prompt cache env vars (RFC-0045)
+	// -------------------------------------------------------------------------
+
+	t.Run("efficiency.promptCache env var mapping", func(t *testing.T) {
+		t.Run("should not set AGENT_PROMPT_CACHE when efficiency is nil", func(t *testing.T) {
+			agent := &kubeswarmv1alpha1.SwarmAgent{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
+					Model:  "claude-sonnet-4-6",
+					Prompt: &kubeswarmv1alpha1.AgentPrompt{Inline: "test"},
+				},
+			}
+			envs := buildTestEnvVars(agent, nil)
+			_, ok := envVal(envs, "AGENT_PROMPT_CACHE")
+			if ok {
+				t.Error("expected AGENT_PROMPT_CACHE to be absent when efficiency is nil")
+			}
+		})
+
+		t.Run("should not set AGENT_PROMPT_CACHE when disabled", func(t *testing.T) {
+			agent := &kubeswarmv1alpha1.SwarmAgent{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
+					Model:  "claude-sonnet-4-6",
+					Prompt: &kubeswarmv1alpha1.AgentPrompt{Inline: "test"},
+					Efficiency: &kubeswarmv1alpha1.EfficiencyConfig{
+						PromptCache: &kubeswarmv1alpha1.PromptCacheConfig{
+							Enabled: false,
+						},
+					},
+				},
+			}
+			envs := buildTestEnvVars(agent, nil)
+			_, ok := envVal(envs, "AGENT_PROMPT_CACHE")
+			if ok {
+				t.Error("expected AGENT_PROMPT_CACHE to be absent when disabled")
+			}
+		})
+
+		t.Run("should set AGENT_PROMPT_CACHE when enabled", func(t *testing.T) {
+			agent := &kubeswarmv1alpha1.SwarmAgent{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: kubeswarmv1alpha1.SwarmAgentSpec{
+					Model:  "claude-sonnet-4-6",
+					Prompt: &kubeswarmv1alpha1.AgentPrompt{Inline: "test"},
+					Efficiency: &kubeswarmv1alpha1.EfficiencyConfig{
+						PromptCache: &kubeswarmv1alpha1.PromptCacheConfig{
+							Enabled:               true,
+							CacheableSystemPrompt: true,
+							CacheableTools:        true,
+							MinPrefixTokens:       2048,
+						},
+					},
+				},
+			}
+			envs := buildTestEnvVars(agent, nil)
+			v, ok := envVal(envs, "AGENT_PROMPT_CACHE")
+			if !ok {
+				t.Fatal("expected AGENT_PROMPT_CACHE to be set")
+			}
+			var parsed map[string]any
+			if err := json.Unmarshal([]byte(v), &parsed); err != nil {
+				t.Fatalf("AGENT_PROMPT_CACHE is not valid JSON: %v", err)
+			}
+			if parsed["enabled"] != true {
+				t.Error("expected enabled=true in AGENT_PROMPT_CACHE")
+			}
+			if parsed["cacheableSystemPrompt"] != true {
+				t.Error("expected cacheableSystemPrompt=true")
+			}
+			if parsed["cacheableTools"] != true {
+				t.Error("expected cacheableTools=true")
+			}
+			if int(parsed["minPrefixTokens"].(float64)) != 2048 {
+				t.Errorf("minPrefixTokens = %v, want 2048", parsed["minPrefixTokens"])
+			}
+		})
+	})
 }

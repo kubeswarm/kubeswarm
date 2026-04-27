@@ -136,6 +136,28 @@ type MCPToolSpec struct {
 	// When dynamic is true, the agent re-discovers tools at runtime.
 	// +optional
 	Discovery *MCPDiscoveryConfig `json:"discovery,omitempty"`
+
+	// Cache configures tool result caching for this MCP server (RFC-0038).
+	// When enabled, idempotent tool calls are cached with a TTL.
+	// +optional
+	Cache *ToolCacheConfig `json:"cache,omitempty"`
+}
+
+// ToolCacheConfig configures caching for an MCP server's tool results (RFC-0038).
+type ToolCacheConfig struct {
+	// Enabled turns on result caching for this server's tools. Default false.
+	Enabled bool `json:"enabled,omitempty"`
+
+	// TTLSeconds is the cache entry lifetime. Default 300.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=86400
+	// +kubebuilder:default=300
+	// +optional
+	TTLSeconds int `json:"ttlSeconds,omitempty"`
+
+	// ExcludeTools lists tool names that must never be cached (non-idempotent).
+	// +optional
+	ExcludeTools []string `json:"excludeTools,omitempty"`
 }
 
 // MCPDiscoveryConfig configures dynamic tool discovery for an MCP server.
@@ -984,6 +1006,39 @@ type AgentObservability struct {
 }
 
 // -----------------------------------------------------------------------------
+// Efficiency (RFC-0045)
+// -----------------------------------------------------------------------------
+
+// EfficiencyConfig groups all token efficiency settings for an agent.
+// Additional fields will be added by sibling RFCs (e.g. RFC-0047 Response Caching).
+type EfficiencyConfig struct {
+	// PromptCache enables provider-side prompt caching with explicit prefix boundaries.
+	// +optional
+	PromptCache *PromptCacheConfig `json:"promptCache,omitempty"`
+}
+
+// PromptCacheConfig configures provider prompt cache enforcement.
+type PromptCacheConfig struct {
+	// Enabled turns on prompt cache enforcement for this agent.
+	Enabled bool `json:"enabled"`
+
+	// CacheableSystemPrompt marks the system prompt as stable across calls
+	// and eligible for the cacheable prefix.
+	// +optional
+	CacheableSystemPrompt bool `json:"cacheableSystemPrompt,omitempty"`
+
+	// CacheableTools marks tool definitions as cacheable.
+	// +kubebuilder:default=true
+	// +optional
+	CacheableTools bool `json:"cacheableTools,omitempty"`
+
+	// MinPrefixTokens skips caching when the eligible prefix is shorter than this.
+	// +kubebuilder:default=1024
+	// +optional
+	MinPrefixTokens int `json:"minPrefixTokens,omitempty"`
+}
+
+// -----------------------------------------------------------------------------
 // SwarmAgentSpec / Status
 // -----------------------------------------------------------------------------
 
@@ -1061,6 +1116,12 @@ type SwarmAgentSpec struct {
 	// Observability groups health check, logging, and metrics configuration.
 	// +optional
 	Observability *AgentObservability `json:"observability,omitempty"`
+
+	// --- Efficiency: token cost optimisation (RFC-0045) ---
+
+	// Efficiency configures token efficiency primitives.
+	// +optional
+	Efficiency *EfficiencyConfig `json:"efficiency,omitempty"`
 
 	// --- Gateway: how the agent routes to other agents (RFC-0052) ---
 

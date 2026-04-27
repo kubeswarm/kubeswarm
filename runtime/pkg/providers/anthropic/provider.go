@@ -458,6 +458,11 @@ func buildAnthropicParams(cfg *config.Config, messages []anthropicsdk.MessagePar
 		params.Tools = tools
 	}
 
+	// RFC-0045: Prompt cache enforcement.
+	if cfg.PromptCache != nil && cfg.PromptCache.Enabled {
+		applyPromptCacheHints(cfg, &params)
+	}
+
 	// Answer-token cap applies regardless of reasoning mode.
 	if cfg.MaxAnswerTokensPerCall > 0 {
 		if int64(cfg.MaxAnswerTokensPerCall) < params.MaxTokens {
@@ -492,6 +497,30 @@ func buildAnthropicParams(cfg *config.Config, messages []anthropicsdk.MessagePar
 	params.Thinking = anthropicsdk.ThinkingConfigParamOfEnabled(effectiveBudget)
 	// Effort is ignored for Anthropic (budget-driven).
 	return params
+}
+
+// applyPromptCacheHints inserts cache_control markers on the system prompt and/or
+// the last tool definition when the agent has prompt caching enabled (RFC-0045).
+func applyPromptCacheHints(cfg *config.Config, params *anthropicsdk.MessageNewParams) {
+	minTokens := cfg.PromptCache.MinPrefixTokens
+	if minTokens <= 0 {
+		minTokens = 1024
+	}
+
+	// Rough char-to-token estimate: 1 token per 4 characters.
+	if cfg.PromptCache.CacheableSystemPrompt && len(params.System) > 0 {
+		estimatedTokens := len(params.System[0].Text) / 4
+		if estimatedTokens >= minTokens {
+			params.System[0].CacheControl = anthropicsdk.NewCacheControlEphemeralParam()
+		}
+	}
+
+	if cfg.PromptCache.CacheableTools && len(params.Tools) > 0 {
+		last := &params.Tools[len(params.Tools)-1]
+		if last.OfTool != nil {
+			last.OfTool.CacheControl = anthropicsdk.NewCacheControlEphemeralParam()
+		}
+	}
 }
 
 // countThinkingTokens approximates thinking tokens from a response's content blocks.

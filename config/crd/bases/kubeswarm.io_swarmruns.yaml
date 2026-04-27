@@ -1142,6 +1142,29 @@ spec:
                                 x-kubernetes-validations:
                                 - message: bearer and mtls are mutually exclusive
                                   rule: '!(has(self.bearer) && has(self.mtls))'
+                              cache:
+                                description: |-
+                                  Cache configures tool result caching for this MCP server (RFC-0038).
+                                  When enabled, idempotent tool calls are cached with a TTL.
+                                properties:
+                                  enabled:
+                                    description: Enabled turns on result caching for
+                                      this server's tools. Default false.
+                                    type: boolean
+                                  excludeTools:
+                                    description: ExcludeTools lists tool names that
+                                      must never be cached (non-idempotent).
+                                    items:
+                                      type: string
+                                    type: array
+                                  ttlSeconds:
+                                    default: 300
+                                    description: TTLSeconds is the cache entry lifetime.
+                                      Default 300.
+                                    maximum: 86400
+                                    minimum: 1
+                                    type: integer
+                                type: object
                               capabilityRef:
                                 description: |-
                                   CapabilityRef names a capability ID in the namespace's SwarmRegistry.

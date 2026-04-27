@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strings"
 
 	openaisdk "github.com/openai/openai-go"
@@ -83,6 +84,11 @@ func (p *Provider) RunTask(
 	}
 
 	openaiTools := toOpenAITools(tools)
+	// RFC-0045: Sort tools by name for deterministic prefix ordering so
+	// OpenAI's automatic prefix caching activates reliably.
+	if cfg.PromptCache != nil && cfg.PromptCache.Enabled && cfg.PromptCache.CacheableTools {
+		sortOpenAITools(openaiTools)
+	}
 	var usage queue.TokenUsage
 
 	for {
@@ -216,6 +222,15 @@ func toOpenAITools(tools []mcp.Tool) []openaisdk.ChatCompletionToolParam {
 		})
 	}
 	return params
+}
+
+// sortOpenAITools sorts tool definitions by function name for deterministic
+// prefix ordering. OpenAI auto-caches matching prefixes; stable ordering
+// ensures the cache hits reliably across requests (RFC-0045).
+func sortOpenAITools(tools []openaisdk.ChatCompletionToolParam) {
+	slices.SortFunc(tools, func(a, b openaisdk.ChatCompletionToolParam) int {
+		return strings.Compare(a.Function.Name, b.Function.Name)
+	})
 }
 
 // rawToMap converts a json.RawMessage into map[string]any for FunctionParameters.

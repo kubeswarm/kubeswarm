@@ -268,6 +268,35 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              efficiency:
+                description: Efficiency configures token efficiency primitives.
+                properties:
+                  promptCache:
+                    description: PromptCache enables provider-side prompt caching
+                      with explicit prefix boundaries.
+                    properties:
+                      cacheableSystemPrompt:
+                        description: |-
+                          CacheableSystemPrompt marks the system prompt as stable across calls
+                          and eligible for the cacheable prefix.
+                        type: boolean
+                      cacheableTools:
+                        default: true
+                        description: CacheableTools marks tool definitions as cacheable.
+                        type: boolean
+                      enabled:
+                        description: Enabled turns on prompt cache enforcement for
+                          this agent.
+                        type: boolean
+                      minPrefixTokens:
+                        default: 1024
+                        description: MinPrefixTokens skips caching when the eligible
+                          prefix is shorter than this.
+                        type: integer
+                    required:
+                    - enabled
+                    type: object
+                type: object
               gateway:
                 description: |-
                   Gateway configures this agent as a gateway to the swarm.
@@ -1375,6 +1404,29 @@ spec:
                           x-kubernetes-validations:
                           - message: bearer and mtls are mutually exclusive
                             rule: '!(has(self.bearer) && has(self.mtls))'
+                        cache:
+                          description: |-
+                            Cache configures tool result caching for this MCP server (RFC-0038).
+                            When enabled, idempotent tool calls are cached with a TTL.
+                          properties:
+                            enabled:
+                              description: Enabled turns on result caching for this
+                                server's tools. Default false.
+                              type: boolean
+                            excludeTools:
+                              description: ExcludeTools lists tool names that must
+                                never be cached (non-idempotent).
+                              items:
+                                type: string
+                              type: array
+                            ttlSeconds:
+                              default: 300
+                              description: TTLSeconds is the cache entry lifetime.
+                                Default 300.
+                              maximum: 86400
+                              minimum: 1
+                              type: integer
+                          type: object
                         capabilityRef:
                           description: |-
                             CapabilityRef names a capability ID in the namespace's SwarmRegistry.

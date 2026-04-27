@@ -136,6 +136,16 @@ type MCPServerConfig struct {
 
 	// Discovery configures dynamic tool list refresh.
 	Discovery *MCPDiscoveryConfigRuntime `json:"discovery,omitempty"`
+
+	// Cache configures tool result caching (RFC-0038).
+	Cache *ToolCacheConfigRuntime `json:"cache,omitempty"`
+}
+
+// ToolCacheConfigRuntime mirrors the CRD ToolCacheConfig for runtime use (RFC-0038).
+type ToolCacheConfigRuntime struct {
+	Enabled      bool     `json:"enabled"`
+	TTLSeconds   int      `json:"ttlSeconds,omitempty"`
+	ExcludeTools []string `json:"excludeTools,omitempty"`
 }
 
 // MCPDiscoveryConfigRuntime holds runtime discovery settings for one MCP server.
@@ -311,6 +321,10 @@ type Config struct {
 	// GatewayTools holds tool definitions injected by the operator (RFC-0052).
 	// Set via AGENT_GATEWAY_TOOLS (JSON array). Nil when not a gateway agent.
 	GatewayTools []GatewayToolConfig
+	// PromptCache configures prompt cache enforcement (RFC-0045).
+	// Injected by the operator as AGENT_PROMPT_CACHE (JSON).
+	// Nil when prompt caching is not configured.
+	PromptCache *PromptCacheConfig
 	// CircuitBreaker configures the circuit breaker for tool calls.
 	// Set via AGENT_CIRCUIT_BREAKER (JSON). Nil when not configured.
 	CircuitBreaker *CircuitBreakerConfig
@@ -346,6 +360,15 @@ var ArtifactFormatExtensions = map[string]string{
 	"json":     ".json",
 	"markdown": ".md",
 	"yaml":     ".yaml",
+}
+
+// PromptCacheConfig mirrors the CRD PromptCacheConfig for runtime use (RFC-0045).
+// Injected by the operator as AGENT_PROMPT_CACHE (JSON).
+type PromptCacheConfig struct {
+	Enabled               bool `json:"enabled"`
+	CacheableSystemPrompt bool `json:"cacheableSystemPrompt,omitempty"`
+	CacheableTools        bool `json:"cacheableTools,omitempty"`
+	MinPrefixTokens       int  `json:"minPrefixTokens,omitempty"`
 }
 
 // CircuitBreakerConfig holds the parsed circuit breaker settings.
@@ -497,6 +520,14 @@ func Load() (*Config, error) {
 		if cfg.ArtifactSaveExtension == "" {
 			cfg.ArtifactSaveExtension = ".txt" // safe fallback
 		}
+	}
+
+	if v := os.Getenv("AGENT_PROMPT_CACHE"); v != "" {
+		var pc PromptCacheConfig
+		if err := json.Unmarshal([]byte(v), &pc); err != nil {
+			return nil, agenterrors.NewConfigError(agenterrors.ErrConfigInvalid, "invalid AGENT_PROMPT_CACHE JSON", err)
+		}
+		cfg.PromptCache = &pc
 	}
 
 	if v := os.Getenv("AGENT_CIRCUIT_BREAKER"); v != "" {
