@@ -346,14 +346,20 @@ func processTask(
 		if origID := t.Meta["original_task_id"]; origID != "" {
 			ageID = origID
 		}
+		// Allow tasks to wait in the queue for up to 3x the execution timeout
+		// before considering them stale. The execution timeout (taskCtx above)
+		// separately limits how long the task can run once picked up. This
+		// prevents slow-to-start pods or queued LLM backends from causing
+		// tasks to be dead-on-arrival.
+		staleThreshold := timeout * 3
 		if parts := strings.SplitN(ageID, "-", 2); len(parts) == 2 {
 			if ms, parseErr := strconv.ParseInt(parts[0], 10, 64); parseErr == nil {
-				if age := time.Since(time.UnixMilli(ms)); age > timeout {
+				if age := time.Since(time.UnixMilli(ms)); age > staleThreshold {
 					slog.Warn("skipping stale task",
 						"task_id", t.ID,
 						"original_task_id", ageID,
 						"age", age.Round(time.Second),
-						"timeout", timeout,
+						"staleThreshold", staleThreshold,
 					)
 					if nackErr := taskQueue.Nack(t, "stale task: age exceeds timeout"); nackErr != nil {
 						slog.Error("nack failed for stale task", "task_id", t.ID, "error", nackErr)

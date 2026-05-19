@@ -308,6 +308,153 @@ type RegistryLookupSpec struct {
 	Fallback string `json:"fallback,omitempty"`
 }
 
+// --- Search tree orchestration (RFC-0050) ---
+
+// SearchStrategy selects the tree exploration algorithm.
+// +kubebuilder:validation:Enum=BFS;BeamSearch
+type SearchStrategy string
+
+const (
+	SearchStrategyBFS        SearchStrategy = "BFS"
+	SearchStrategyBeamSearch SearchStrategy = "BeamSearch"
+)
+
+// SearchNodePhase tracks the lifecycle of a single search tree node.
+// +kubebuilder:validation:Enum=Pending;Running;Scored;Pruned;EvalFailed;Solution
+type SearchNodePhase string
+
+const (
+	SearchNodePhasePending    SearchNodePhase = "Pending"
+	SearchNodePhaseRunning    SearchNodePhase = "Running"
+	SearchNodePhaseScored     SearchNodePhase = "Scored"
+	SearchNodePhasePruned     SearchNodePhase = "Pruned"
+	SearchNodePhaseEvalFailed SearchNodePhase = "EvalFailed"
+	SearchNodePhaseSolution   SearchNodePhase = "Solution"
+)
+
+// SearchTerminationReason explains why the search stopped.
+// +kubebuilder:validation:Enum=MinScoreReached;MaxDepthReached;MaxNodesReached;MaxIterationsReached;BudgetExhausted;PlannerConverged;PlannerFailure;SearchCancelled
+type SearchTerminationReason string
+
+const (
+	SearchTerminationMinScoreReached      SearchTerminationReason = "MinScoreReached"
+	SearchTerminationMaxDepthReached      SearchTerminationReason = "MaxDepthReached"
+	SearchTerminationMaxNodesReached      SearchTerminationReason = "MaxNodesReached"
+	SearchTerminationMaxIterationsReached SearchTerminationReason = "MaxIterationsReached"
+	SearchTerminationBudgetExhausted      SearchTerminationReason = "BudgetExhausted"
+	SearchTerminationPlannerConverged     SearchTerminationReason = "PlannerConverged"
+	SearchTerminationPlannerFailure       SearchTerminationReason = "PlannerFailure"
+	SearchTerminationSearchCancelled      SearchTerminationReason = "SearchCancelled"
+)
+
+// SwarmTeamSearchSpec configures search tree orchestration mode.
+type SwarmTeamSearchSpec struct {
+	// Strategy selects the tree exploration algorithm.
+	// +kubebuilder:validation:Required
+	Strategy SearchStrategy `json:"strategy"`
+
+	// PlannerRole is the role name of the agent that decides branching/pruning.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	PlannerRole string `json:"plannerRole"`
+
+	// ExecutorRole is the role name of the agent that executes each node task.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	ExecutorRole string `json:"executorRole"`
+
+	// EvaluatorRole is the role name of the agent that scores node outputs.
+	// When omitted, the planner must include scoreMillis in expand/converge actions.
+	// Required when strategy is BeamSearch.
+	// +optional
+	EvaluatorRole *string `json:"evaluatorRole,omitempty"`
+
+	// InitialPrompt is the root task description. Go template with .input access.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=524288
+	InitialPrompt string `json:"initialPrompt"`
+
+	// MinScorePercent is the quality threshold (0-100). A node scoring above
+	// this percent (mapped to millis internally) triggers convergence.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	MinScorePercent *int32 `json:"minScorePercent,omitempty"`
+
+	// MaxDepth limits the tree depth. 0 means no limit.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=10
+	// +optional
+	MaxDepth int32 `json:"maxDepth,omitempty"`
+
+	// MaxNodes limits the total number of tree nodes. Budget protection.
+	// Hard-capped at 200 to stay within etcd value size limits.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=200
+	// +kubebuilder:default=50
+	// +optional
+	MaxNodes int32 `json:"maxNodes,omitempty"`
+
+	// MaxOutputBytes limits the size of each node's output and task fields.
+	// Default 4096. Capped at 8192 so that maxNodes * maxOutputBytes stays
+	// well under the etcd 1.5MB value size limit (200 * 8KB = 1.6MB is the
+	// theoretical max; the CEL rule on SwarmTeamSpec enforces the product
+	// does not exceed 1MB).
+	// +kubebuilder:validation:Minimum=256
+	// +kubebuilder:validation:Maximum=8192
+	// +kubebuilder:default=4096
+	// +optional
+	MaxOutputBytes *int32 `json:"maxOutputBytes,omitempty"`
+
+	// MaxIterations limits planner invocations. 0 means no limit.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=20
+	// +optional
+	MaxIterations int32 `json:"maxIterations,omitempty"`
+
+	// MaxParallel is the maximum concurrent executor tasks per level.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=3
+	// +optional
+	MaxParallel int32 `json:"maxParallel,omitempty"`
+
+	// BeamWidth is the number of top-scoring nodes kept per depth level.
+	// Only used when strategy is BeamSearch. Defaults to 3 at runtime when
+	// strategy is BeamSearch and beamWidth is not set. No CRD default so
+	// the CEL mutual exclusion rule can distinguish "not set" from "set".
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	BeamWidth int32 `json:"beamWidth,omitempty"`
+
+	// MaxPlannerRetries is the number of retry attempts when the planner
+	// produces invalid JSON output.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=2
+	// +optional
+	MaxPlannerRetries int32 `json:"maxPlannerRetries,omitempty"`
+
+	// MaxEvaluatorRetries is the number of retry attempts when the evaluator
+	// produces unparseable output. After exhaustion, the node is marked EvalFailed.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=2
+	// +optional
+	MaxEvaluatorRetries int32 `json:"maxEvaluatorRetries,omitempty"`
+
+	// StagnationThreshold is the number of consecutive planner iterations without
+	// improvement to the best score before a StagnationDetected event is emitted.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=5
+	// +optional
+	StagnationThreshold int32 `json:"stagnationThreshold,omitempty"`
+
+	// PlannerTimeoutSeconds is the maximum age (in seconds) of lastPlannerIteration
+	// before the reconciler considers the planner stale and re-invokes it.
+	// +kubebuilder:validation:Minimum=10
+	// +kubebuilder:default=120
+	// +optional
+	PlannerTimeoutSeconds *int32 `json:"plannerTimeoutSeconds,omitempty"`
+}
+
 // SwarmTeamPipelineStep is one node in the SwarmTeam DAG pipeline.
 type SwarmTeamPipelineStep struct {
 	// Role references a role name in spec.roles. The step name equals the role name.
@@ -435,6 +582,15 @@ type SwarmTeamInputSpec struct {
 // SwarmTeamSpec defines the desired state of SwarmTeam.
 // +kubebuilder:validation:XValidation:rule="has(self.routing) ? (!has(self.roles) || self.roles.size() == 0) : (has(self.roles) && self.roles.size() > 0)",message="spec.routing is mutually exclusive with spec.roles; in routed mode omit spec.roles, in pipeline/dynamic mode spec.roles must have at least one role"
 // +kubebuilder:validation:XValidation:rule="!(has(self.routing) && has(self.pipeline) && self.pipeline.size() > 0)",message="spec.routing is mutually exclusive with spec.pipeline"
+// +kubebuilder:validation:XValidation:rule="!(has(self.search) && has(self.pipeline) && self.pipeline.size() > 0)",message="spec.search is mutually exclusive with spec.pipeline"
+// +kubebuilder:validation:XValidation:rule="!(has(self.search) && has(self.routing))",message="spec.search is mutually exclusive with spec.routing"
+// +kubebuilder:validation:XValidation:rule="!has(self.search) || !has(self.search.beamWidth) || self.search.strategy == 'BeamSearch'",message="beamWidth may only be set when strategy is BeamSearch"
+// +kubebuilder:validation:XValidation:rule="!has(self.search) || self.search.strategy != 'BeamSearch' || has(self.search.evaluatorRole)",message="BeamSearch strategy requires evaluatorRole"
+// +kubebuilder:validation:XValidation:rule="!has(self.search) || !has(self.search.evaluatorRole) || self.search.evaluatorRole.size() > 0",message="evaluatorRole must not be empty when set"
+// +kubebuilder:validation:XValidation:rule="!has(self.search) || (self.search.maxNodes * (has(self.search.maxOutputBytes) ? self.search.maxOutputBytes : 4096)) <= 1048576",message="search maxNodes * maxOutputBytes must not exceed 1048576 (1MB) to stay within etcd value size limits"
+// NOTE: plannerRole, executorRole, and evaluatorRole existence checks are
+// performed in the admission webhook (ValidateSearchConfig) instead of CEL
+// because roles.exists() traversal exceeds the CRD CEL cost budget.
 type SwarmTeamSpec struct {
 	// Entry is the role name that receives external tasks in dynamic mode.
 	// Exactly one role should be the entry point for dynamic teams.
@@ -557,6 +713,11 @@ type SwarmTeamSpec struct {
 	// Mutually exclusive with spec.pipeline and spec.roles.
 	// +optional
 	Routing *SwarmTeamRoutingSpec `json:"routing,omitempty"`
+
+	// Search configures search tree orchestration mode.
+	// Mutually exclusive with Pipeline and Routing.
+	// +optional
+	Search *SwarmTeamSearchSpec `json:"search,omitempty"`
 }
 
 // SwarmTeamRoleStatus captures the observed state of one team role.
@@ -641,8 +802,4 @@ type SwarmTeamList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []SwarmTeam `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&SwarmTeam{}, &SwarmTeamList{})
 }

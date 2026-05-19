@@ -343,7 +343,3 @@ type SwarmPolicyList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []SwarmPolicy `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&SwarmPolicy{}, &SwarmPolicyList{})
-}

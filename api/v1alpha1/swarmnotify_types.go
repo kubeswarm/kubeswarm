@@ -184,7 +184,3 @@ type SwarmNotifyList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []SwarmNotify `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&SwarmNotify{}, &SwarmNotifyList{})
-}

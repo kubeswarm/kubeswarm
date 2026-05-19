@@ -153,7 +153,3 @@ type SwarmBudgetList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []SwarmBudget `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&SwarmBudget{}, &SwarmBudgetList{})
-}

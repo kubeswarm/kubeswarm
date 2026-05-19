@@ -156,7 +156,3 @@ type SwarmMemoryList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []SwarmMemory `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&SwarmMemory{}, &SwarmMemoryList{})
-}

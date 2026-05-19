@@ -101,6 +101,11 @@ type SwarmRunSpec struct {
 	// +optional
 	Routing *SwarmTeamRoutingSpec `json:"routing,omitempty"`
 
+	// Search is a snapshot of the SwarmTeam search config at trigger time.
+	// Set when the team operates in search mode. Mutually exclusive with Pipeline and Routing.
+	// +optional
+	Search *SwarmTeamSearchSpec `json:"search,omitempty"`
+
 	// TimeoutSeconds is the maximum wall-clock seconds this run may take.
 	// Zero means no timeout.
 	// +kubebuilder:validation:Minimum=1
@@ -140,6 +145,11 @@ type SwarmRunStatus struct {
 	// TotalCostUSD is the estimated total dollar cost of this run, summed across
 	// all steps using the operator's configured CostProvider. Decimal string.
 	TotalCostUSD string `json:"totalCostUSD,omitempty"`
+
+	// SearchTree holds the search tree state for search-mode runs.
+	// Only populated when spec.search is set.
+	// +optional
+	SearchTree *SearchTreeStatus `json:"searchTree,omitempty"`
 
 	// ObservedGeneration is the .metadata.generation this status reflects.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -182,8 +192,4 @@ type SwarmRunList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []SwarmRun `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&SwarmRun{}, &SwarmRunList{})
 }

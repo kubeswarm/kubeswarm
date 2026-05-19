@@ -1382,9 +1382,5 @@ type SwarmAgentList struct {
 	Items           []SwarmAgent `json:"items"`
 }
 
-func init() {
-	SchemeBuilder.Register(&SwarmAgent{}, &SwarmAgentList{})
-}
-
 // Ensure resource.Quantity is imported (used transitively by corev1.ResourceRequirements).
 var _ = resource.MustParse

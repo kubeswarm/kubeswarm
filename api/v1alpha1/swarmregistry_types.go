@@ -167,7 +167,3 @@ type SwarmRegistryList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []SwarmRegistry `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&SwarmRegistry{}, &SwarmRegistryList{})
-}

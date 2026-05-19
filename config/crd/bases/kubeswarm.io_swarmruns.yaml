@@ -1362,6 +1362,134 @@ spec:
                       {{ .Input }} to embed the task input in a custom prompt.
                     type: string
                 type: object
+              search:
+                description: |-
+                  Search is a snapshot of the SwarmTeam search config at trigger time.
+                  Set when the team operates in search mode. Mutually exclusive with Pipeline and Routing.
+                properties:
+                  beamWidth:
+                    description: |-
+                      BeamWidth is the number of top-scoring nodes kept per depth level.
+                      Only used when strategy is BeamSearch. Defaults to 3 at runtime when
+                      strategy is BeamSearch and beamWidth is not set. No CRD default so
+                      the CEL mutual exclusion rule can distinguish "not set" from "set".
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  evaluatorRole:
+                    description: |-
+                      EvaluatorRole is the role name of the agent that scores node outputs.
+                      When omitted, the planner must include scoreMillis in expand/converge actions.
+                      Required when strategy is BeamSearch.
+                    type: string
+                  executorRole:
+                    description: ExecutorRole is the role name of the agent that executes
+                      each node task.
+                    minLength: 1
+                    type: string
+                  initialPrompt:
+                    description: InitialPrompt is the root task description. Go template
+                      with .input access.
+                    maxLength: 524288
+                    type: string
+                  maxDepth:
+                    default: 10
+                    description: MaxDepth limits the tree depth. 0 means no limit.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxEvaluatorRetries:
+                    default: 2
+                    description: |-
+                      MaxEvaluatorRetries is the number of retry attempts when the evaluator
+                      produces unparseable output. After exhaustion, the node is marked EvalFailed.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxIterations:
+                    default: 20
+                    description: MaxIterations limits planner invocations. 0 means
+                      no limit.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxNodes:
+                    default: 50
+                    description: |-
+                      MaxNodes limits the total number of tree nodes. Budget protection.
+                      Hard-capped at 200 to stay within etcd value size limits.
+                    format: int32
+                    maximum: 200
+                    minimum: 1
+                    type: integer
+                  maxOutputBytes:
+                    default: 4096
+                    description: |-
+                      MaxOutputBytes limits the size of each node's output and task fields.
+                      Default 4096. Capped at 8192 so that maxNodes * maxOutputBytes stays
+                      well under the etcd 1.5MB value size limit (200 * 8KB = 1.6MB is the
+                      theoretical max; the CEL rule on SwarmTeamSpec enforces the product
+                      does not exceed 1MB).
+                    format: int32
+                    maximum: 8192
+                    minimum: 256
+                    type: integer
+                  maxParallel:
+                    default: 3
+                    description: MaxParallel is the maximum concurrent executor tasks
+                      per level.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  maxPlannerRetries:
+                    default: 2
+                    description: |-
+                      MaxPlannerRetries is the number of retry attempts when the planner
+                      produces invalid JSON output.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  minScorePercent:
+                    description: |-
+                      MinScorePercent is the quality threshold (0-100). A node scoring above
+                      this percent (mapped to millis internally) triggers convergence.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  plannerRole:
+                    description: PlannerRole is the role name of the agent that decides
+                      branching/pruning.
+                    minLength: 1
+                    type: string
+                  plannerTimeoutSeconds:
+                    default: 120
+                    description: |-
+                      PlannerTimeoutSeconds is the maximum age (in seconds) of lastPlannerIteration
+                      before the reconciler considers the planner stale and re-invokes it.
+                    format: int32
+                    minimum: 10
+                    type: integer
+                  stagnationThreshold:
+                    default: 5
+                    description: |-
+                      StagnationThreshold is the number of consecutive planner iterations without
+                      improvement to the best score before a StagnationDetected event is emitted.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  strategy:
+                    description: Strategy selects the tree exploration algorithm.
+                    enum:
+                    - BFS
+                    - BeamSearch
+                    type: string
+                required:
+                - executorRole
+                - initialPrompt
+                - plannerRole
+                - strategy
+                type: object
               teamGeneration:
                 description: |-
                   TeamGeneration is the SwarmTeam spec.generation at the time this run was
@@ -1470,6 +1598,150 @@ spec:
                 - Succeeded
                 - Failed
                 type: string
+              searchTree:
+                description: |-
+                  SearchTree holds the search tree state for search-mode runs.
+                  Only populated when spec.search is set.
+                properties:
+                  iterations:
+                    description: Iterations is the number of planner invocations completed
+                      so far.
+                    format: int32
+                    type: integer
+                  lastPlannerIteration:
+                    description: LastPlannerIteration is the timestamp of the most
+                      recent planner invocation.
+                    format: date-time
+                    type: string
+                  nodes:
+                    description: Nodes is the ordered list of all tree nodes.
+                    items:
+                      description: |-
+                        SearchNodeStatus records the state of a single search tree node.
+                        Stored in SwarmRun status (Phase 2).
+                      properties:
+                        depth:
+                          description: Depth is the tree depth of this node (root
+                            = 0).
+                          format: int32
+                          type: integer
+                        id:
+                          description: ID is the zero-based index of this node in
+                            the tree.
+                          format: int32
+                          type: integer
+                        output:
+                          description: Output is the executor's response for this
+                            node.
+                          type: string
+                        parentID:
+                          description: ParentID is the ID of the parent node. Nil
+                            for the root node.
+                          format: int32
+                          type: integer
+                        phase:
+                          description: Phase tracks this node's lifecycle.
+                          enum:
+                          - Pending
+                          - Running
+                          - Scored
+                          - Pruned
+                          - EvalFailed
+                          - Solution
+                          type: string
+                        scoreMillis:
+                          description: ScoreMillis is the quality score (0-1000) assigned
+                            by the evaluator or planner.
+                          format: int32
+                          maximum: 1000
+                          minimum: 0
+                          type: integer
+                        scoreReasoning:
+                          description: ScoreReasoning is the evaluator's explanation
+                            for the score.
+                          type: string
+                        task:
+                          description: Task is the task description assigned to this
+                            node.
+                          type: string
+                        taskID:
+                          description: |-
+                            TaskID is the queue task ID for the in-flight executor or evaluator call.
+                            Empty when the node is not waiting for a result.
+                          type: string
+                        tokenUsage:
+                          description: TokenUsage records tokens consumed by the executor
+                            for this node.
+                          properties:
+                            inputTokens:
+                              description: InputTokens is the total number of prompt/input
+                                tokens sent to the LLM.
+                              format: int64
+                              type: integer
+                            model:
+                              description: |-
+                                Model identifies which model generated this usage record.
+                                Populated for advisor calls to enable per-model cost attribution.
+                              type: string
+                            outputTokens:
+                              description: |-
+                                OutputTokens is the total number of final-answer/completion tokens generated
+                                by the LLM. This does NOT include thinking tokens - those are counted
+                                separately in ThinkingTokens.
+                              format: int64
+                              type: integer
+                            thinkingTokens:
+                              description: |-
+                                ThinkingTokens is the number of tokens spent on the model's internal
+                                reasoning pass, billed at the provider's thinking-token rate.
+                                Counted separately from OutputTokens, not additive. Total tokens per
+                                step is InputTokens + OutputTokens + ThinkingTokens; consumers must sum
+                                all three to avoid undercounting. Zero on non-reasoning calls. For
+                                multi-turn steps (tool-use loops), this is the sum across all turns in
+                                the step.
+                              format: int64
+                              type: integer
+                            totalTokens:
+                              description: |-
+                                TotalTokens is InputTokens + OutputTokens + ThinkingTokens, provided for
+                                convenient display.
+                              format: int64
+                              type: integer
+                          required:
+                          - inputTokens
+                          - outputTokens
+                          - totalTokens
+                          type: object
+                      required:
+                      - depth
+                      - id
+                      - phase
+                      - task
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - id
+                    x-kubernetes-list-type: map
+                  solutionNodeID:
+                    description: SolutionNodeID is the ID of the node selected as
+                      the final answer.
+                    format: int32
+                    type: integer
+                  terminationReason:
+                    description: TerminationReason explains why the search stopped.
+                    enum:
+                    - MinScoreReached
+                    - MaxDepthReached
+                    - MaxNodesReached
+                    - MaxIterationsReached
+                    - BudgetExhausted
+                    - PlannerConverged
+                    - PlannerFailure
+                    - SearchCancelled
+                    type: string
+                required:
+                - iterations
+                type: object
               startTime:
                 description: StartTime is when this run began executing.
                 format: date-time

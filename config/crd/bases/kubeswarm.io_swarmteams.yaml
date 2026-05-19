@@ -59,7 +59,11 @@ spec:
           metadata:
             type: object
           spec:
-            description: SwarmTeamSpec defines the desired state of SwarmTeam.
+            description: |-
+              SwarmTeamSpec defines the desired state of SwarmTeam.
+              NOTE: plannerRole, executorRole, and evaluatorRole existence checks are
+              performed in the admission webhook (ValidateSearchConfig) instead of CEL
+              because roles.exists() traversal exceeds the CRD CEL cost budget.
             properties:
               artifactStore:
                 description: |-
@@ -1558,6 +1562,134 @@ spec:
                   Zero means no age-based cleanup (only count-based limits apply).
                   Example: "168h" (7 days), "720h" (30 days).
                 type: string
+              search:
+                description: |-
+                  Search configures search tree orchestration mode.
+                  Mutually exclusive with Pipeline and Routing.
+                properties:
+                  beamWidth:
+                    description: |-
+                      BeamWidth is the number of top-scoring nodes kept per depth level.
+                      Only used when strategy is BeamSearch. Defaults to 3 at runtime when
+                      strategy is BeamSearch and beamWidth is not set. No CRD default so
+                      the CEL mutual exclusion rule can distinguish "not set" from "set".
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  evaluatorRole:
+                    description: |-
+                      EvaluatorRole is the role name of the agent that scores node outputs.
+                      When omitted, the planner must include scoreMillis in expand/converge actions.
+                      Required when strategy is BeamSearch.
+                    type: string
+                  executorRole:
+                    description: ExecutorRole is the role name of the agent that executes
+                      each node task.
+                    minLength: 1
+                    type: string
+                  initialPrompt:
+                    description: InitialPrompt is the root task description. Go template
+                      with .input access.
+                    maxLength: 524288
+                    type: string
+                  maxDepth:
+                    default: 10
+                    description: MaxDepth limits the tree depth. 0 means no limit.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxEvaluatorRetries:
+                    default: 2
+                    description: |-
+                      MaxEvaluatorRetries is the number of retry attempts when the evaluator
+                      produces unparseable output. After exhaustion, the node is marked EvalFailed.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxIterations:
+                    default: 20
+                    description: MaxIterations limits planner invocations. 0 means
+                      no limit.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxNodes:
+                    default: 50
+                    description: |-
+                      MaxNodes limits the total number of tree nodes. Budget protection.
+                      Hard-capped at 200 to stay within etcd value size limits.
+                    format: int32
+                    maximum: 200
+                    minimum: 1
+                    type: integer
+                  maxOutputBytes:
+                    default: 4096
+                    description: |-
+                      MaxOutputBytes limits the size of each node's output and task fields.
+                      Default 4096. Capped at 8192 so that maxNodes * maxOutputBytes stays
+                      well under the etcd 1.5MB value size limit (200 * 8KB = 1.6MB is the
+                      theoretical max; the CEL rule on SwarmTeamSpec enforces the product
+                      does not exceed 1MB).
+                    format: int32
+                    maximum: 8192
+                    minimum: 256
+                    type: integer
+                  maxParallel:
+                    default: 3
+                    description: MaxParallel is the maximum concurrent executor tasks
+                      per level.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  maxPlannerRetries:
+                    default: 2
+                    description: |-
+                      MaxPlannerRetries is the number of retry attempts when the planner
+                      produces invalid JSON output.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  minScorePercent:
+                    description: |-
+                      MinScorePercent is the quality threshold (0-100). A node scoring above
+                      this percent (mapped to millis internally) triggers convergence.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  plannerRole:
+                    description: PlannerRole is the role name of the agent that decides
+                      branching/pruning.
+                    minLength: 1
+                    type: string
+                  plannerTimeoutSeconds:
+                    default: 120
+                    description: |-
+                      PlannerTimeoutSeconds is the maximum age (in seconds) of lastPlannerIteration
+                      before the reconciler considers the planner stale and re-invokes it.
+                    format: int32
+                    minimum: 10
+                    type: integer
+                  stagnationThreshold:
+                    default: 5
+                    description: |-
+                      StagnationThreshold is the number of consecutive planner iterations without
+                      improvement to the best score before a StagnationDetected event is emitted.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  strategy:
+                    description: Strategy selects the tree exploration algorithm.
+                    enum:
+                    - BFS
+                    - BeamSearch
+                    type: string
+                required:
+                - executorRole
+                - initialPrompt
+                - plannerRole
+                - strategy
+                type: object
               successfulRunsHistoryLimit:
                 default: 10
                 description: |-
@@ -1583,6 +1715,24 @@ spec:
             - message: spec.routing is mutually exclusive with spec.pipeline
               rule: '!(has(self.routing) && has(self.pipeline) && self.pipeline.size()
                 > 0)'
+            - message: spec.search is mutually exclusive with spec.pipeline
+              rule: '!(has(self.search) && has(self.pipeline) && self.pipeline.size()
+                > 0)'
+            - message: spec.search is mutually exclusive with spec.routing
+              rule: '!(has(self.search) && has(self.routing))'
+            - message: beamWidth may only be set when strategy is BeamSearch
+              rule: '!has(self.search) || !has(self.search.beamWidth) || self.search.strategy
+                == ''BeamSearch'''
+            - message: BeamSearch strategy requires evaluatorRole
+              rule: '!has(self.search) || self.search.strategy != ''BeamSearch'' ||
+                has(self.search.evaluatorRole)'
+            - message: evaluatorRole must not be empty when set
+              rule: '!has(self.search) || !has(self.search.evaluatorRole) || self.search.evaluatorRole.size()
+                > 0'
+            - message: search maxNodes * maxOutputBytes must not exceed 1048576 (1MB)
+                to stay within etcd value size limits
+              rule: '!has(self.search) || (self.search.maxNodes * (has(self.search.maxOutputBytes)
+                ? self.search.maxOutputBytes : 4096)) <= 1048576'
           status:
             description: SwarmTeamStatus defines the observed state of SwarmTeam.
             properties:
