@@ -803,7 +803,3 @@ type SwarmTeamList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []SwarmTeam `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&SwarmTeam{}, &SwarmTeamList{})
-}

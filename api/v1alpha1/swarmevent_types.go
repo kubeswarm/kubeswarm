@@ -177,7 +177,3 @@ type SwarmEventList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []SwarmEvent `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&SwarmEvent{}, &SwarmEventList{})
-}

@@ -193,7 +193,3 @@ type SwarmRunList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []SwarmRun `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&SwarmRun{}, &SwarmRunList{})
-}

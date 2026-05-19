@@ -169,7 +169,3 @@ type SwarmSettingsList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []SwarmSettings `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&SwarmSettings{}, &SwarmSettingsList{})
-}
