@@ -171,6 +171,7 @@ func (r *SwarmRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		run.Spec.Pipeline = team.Spec.Pipeline
 		run.Spec.Roles = team.Spec.Roles
 		run.Spec.Routing = team.Spec.Routing
+		run.Spec.Search = team.Spec.Search
 		run.Spec.DefaultContextPolicy = team.Spec.DefaultContextPolicy
 		if run.Spec.Output == "" {
 			run.Spec.Output = team.Spec.Output
@@ -217,6 +218,11 @@ func (r *SwarmRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if r.AuditEmitter != nil {
 			r.AuditEmitter.Emit(newRunAuditEvent(audit.ActionRunTriggered, audit.StatusSuccess, run, ""))
 		}
+	}
+
+	// Search-mode team run (RFC-0050).
+	if run.Spec.Search != nil {
+		return r.reconcileSearchRun(ctx, run, logger)
 	}
 
 	// Dynamic-mode team run: entry role + roles, no pipeline, no routing.

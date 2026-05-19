@@ -50,6 +50,13 @@ const (
 	ActionGuardrailEvaluated Action = "guardrail.evaluated"
 	ActionMemoryRetrieved    Action = "memory.retrieved"
 	ActionMemoryStored       Action = "memory.stored"
+
+	// Search tree orchestration actions (RFC-0050).
+	ActionSearchNodeCreated    Action = "search.node.created"
+	ActionSearchNodeScored     Action = "search.node.scored"
+	ActionSearchNodePruned     Action = "search.node.pruned"
+	ActionSearchNodeEvalFailed Action = "search.node.evalFailed"
+	ActionSearchNodeSolution   Action = "search.node.solution"
 )
 
 // Status represents the outcome of an audited action.

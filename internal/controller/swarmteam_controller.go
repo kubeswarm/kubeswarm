@@ -271,12 +271,12 @@ func (r *SwarmTeamReconciler) validateTopology(team *kubeswarmv1alpha1.SwarmTeam
 		roleSet[role.Name] = struct{}{}
 	}
 
-	// Entry is optional in pipeline mode (handled separately), but required for dynamic mode.
+	// Entry is optional in pipeline and search modes, but required for dynamic mode.
 	if team.Spec.Entry != "" {
 		if _, ok := roleSet[team.Spec.Entry]; !ok {
 			return fmt.Errorf("spec.entry %q is not a declared role", team.Spec.Entry)
 		}
-	} else if len(team.Spec.Roles) > 0 {
+	} else if len(team.Spec.Roles) > 0 && team.Spec.Search == nil {
 		return fmt.Errorf("spec.entry is required in dynamic mode")
 	}
 
