@@ -3,7 +3,7 @@ module github.com/kubeswarm/kubeswarm
 go 1.26.3
 
 require (
-	github.com/go-logr/logr v1.4.3
+	github.com/go-logr/logr v1.4.4
 	github.com/robfig/cron/v3 v3.0.1
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.43.0
